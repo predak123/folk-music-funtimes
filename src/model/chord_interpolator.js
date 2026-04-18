@@ -44,6 +44,7 @@ function createEmptyModel() {
       onsetSignatureChordTotals: {},
       onsetMeasureSignatureChordTotals: {},
       exactMelodyPaths: {},
+      fuzzyPartLibrary: [],
       cadencePositions: {},
       emissions: {},
       emissionTotals: {},
@@ -172,6 +173,55 @@ function onsetLabel(change) {
   return change ? "change" : "stay";
 }
 
+function buildPartSlotKey(partIndex, measureInPart, beatInBar) {
+  return [
+    partIndex,
+    measureInPart,
+    beatInBar
+  ].join("|");
+}
+
+function scorePartFingerprintSimilarity(targetMeasures, candidateMeasures) {
+  var left = targetMeasures || [];
+  var right = candidateMeasures || [];
+  var compareCount = Math.min(left.length, right.length);
+  var exactMatches = 0;
+  var prefixMatches = 0;
+  var cadenceMatches = 0;
+  var i;
+
+  if (!left.length || !right.length) {
+    return -Infinity;
+  }
+
+  for (i = 0; i < compareCount; i += 1) {
+    if (left[i] !== right[i]) {
+      break;
+    }
+
+    prefixMatches += 1;
+  }
+
+  for (i = 0; i < compareCount; i += 1) {
+    if (left[i] === right[i]) {
+      exactMatches += 1;
+    }
+  }
+
+  for (i = 1; i <= Math.min(2, compareCount); i += 1) {
+    if (left[left.length - i] === right[right.length - i]) {
+      cadenceMatches += 1;
+    }
+  }
+
+  return (
+    (1.35 * prefixMatches) +
+    (0.85 * exactMatches) +
+    (1.10 * cadenceMatches) -
+    (0.60 * Math.abs(left.length - right.length))
+  );
+}
+
 function trainOnParsedTune(model, parsedTune) {
   var usableLabels = 0;
   var previousToken = "__START__";
@@ -181,6 +231,7 @@ function trainOnParsedTune(model, parsedTune) {
   var measurePatterns = {};
   var pathTokens = [];
   var hasFullPath = true;
+  var partLibraryEntries = {};
   var i;
 
   for (i = 0; i < parsedTune.beatSlices.length; i += 1) {
@@ -235,6 +286,15 @@ function trainOnParsedTune(model, parsedTune) {
         };
       }
       measurePatterns[measurePatternId].beats.push(String(slice.beatInBar) + "=" + normalized.token);
+
+      if (!partLibraryEntries[slice.partIndex]) {
+        partLibraryEntries[slice.partIndex] = {
+          partIndex: slice.partIndex,
+          slots: {}
+        };
+      }
+
+      partLibraryEntries[slice.partIndex].slots[buildPartSlotKey(slice.partIndex, slice.measureInPart, slice.beatInBar)] = normalized.token;
     }
 
     var emissionBucket = ensureNestedMap(model.counts.emissions, normalized.token);
@@ -261,6 +321,24 @@ function trainOnParsedTune(model, parsedTune) {
 
   if (usableLabels > 0 && hasFullPath && pathTokens.length === parsedTune.beatSlices.length && parsedTune.melodyFingerprint) {
     incrementCount(ensureNestedMap(model.counts.exactMelodyPaths, parsedTune.melodyFingerprint), pathTokens.join("/"), 1);
+  }
+
+  if (usableLabels > 0 && parsedTune.partFingerprints && parsedTune.partFingerprints.length) {
+    parsedTune.partFingerprints.forEach(function (partFingerprint) {
+      var entry = partLibraryEntries[partFingerprint.partIndex];
+      if (!entry) {
+        return;
+      }
+
+      model.counts.fuzzyPartLibrary.push({
+        styleKey: styleKey,
+        typeMeterKey: typeMeterKey,
+        modeFamily: parsedTune.modeInfo.modeFamily,
+        partIndex: partFingerprint.partIndex,
+        measureSignatures: partFingerprint.measureSignatures || [],
+        slots: entry.slots
+      });
+    });
   }
 
   if (usableLabels > 0) {
@@ -372,13 +450,37 @@ function beatStrength(slice, meterInfo) {
   return slice.beatInBar === 0 ? 1.35 : 0.9;
 }
 
+function rhythmFamilyMultiplier(parsedTune, slice) {
+  var typeName = String(parsedTune.type || "").toLowerCase();
+
+  if (parsedTune.meterInfo.raw === "4/4" && ["reel", "hornpipe", "strathspey", "march"].indexOf(typeName) !== -1) {
+    if (slice.beatInBar === 0) {
+      return 1.25;
+    }
+
+    if (slice.beatInBar === 2) {
+      return 1.15;
+    }
+  }
+
+  if (parsedTune.meterInfo.raw === "2/4" && typeName === "polka") {
+    return slice.beatInBar === 0 ? 1.20 : 1.05;
+  }
+
+  if (parsedTune.meterInfo.raw === "3/4" && typeName === "waltz") {
+    return slice.beatInBar === 0 ? 1.25 : 0.95;
+  }
+
+  return 1;
+}
+
 function scoreStrongBeatOnsetFit(token, slice, parsedTune, modeInfo, chordTones, scalePitchClasses) {
   if (!slice.subPulsePcs || !slice.subPulsePcs.onset || !slice.subPulsePcs.onset.length) {
     return 0;
   }
 
   var onsetPcs = slice.subPulsePcs.onset;
-  var strength = beatStrength(slice, parsedTune.meterInfo);
+  var strength = beatStrength(slice, parsedTune.meterInfo) * rhythmFamilyMultiplier(parsedTune, slice);
   var chordWeight = 1.15 * strength;
   var scaleWeight = 0.12 * strength;
   var clashPenalty = -1.55 * strength;
@@ -627,6 +729,62 @@ function buildExactMelodyPathHints(model, parsedTune) {
   }, {});
 }
 
+function buildFuzzyPartHints(model, parsedTune) {
+  var output = {};
+  var entries = model.counts.fuzzyPartLibrary || [];
+  var topMatches = [];
+
+  if (!parsedTune.partFingerprints || !parsedTune.partFingerprints.length || !entries.length) {
+    return output;
+  }
+
+  parsedTune.partFingerprints.forEach(function (targetPart) {
+    entries.forEach(function (entry) {
+      if (entry.typeMeterKey !== buildTypeMeterKey(parsedTune)) {
+        return;
+      }
+
+      var similarity = scorePartFingerprintSimilarity(targetPart.measureSignatures, entry.measureSignatures);
+      if (!isFinite(similarity) || similarity <= 1.5) {
+        return;
+      }
+
+      if (entry.modeFamily === parsedTune.modeInfo.modeFamily) {
+        similarity += 0.8;
+      }
+
+      if (entry.partIndex === targetPart.partIndex) {
+        similarity += 0.35;
+      }
+
+      topMatches.push({
+        partIndex: targetPart.partIndex,
+        similarity: similarity,
+        slots: entry.slots
+      });
+    });
+  });
+
+  topMatches.sort(function (left, right) {
+    return right.similarity - left.similarity;
+  });
+
+  topMatches.slice(0, 8).forEach(function (match) {
+    Object.keys(match.slots || {}).forEach(function (slotKey) {
+      var parts = slotKey.split("|");
+      var targetSlotKey = buildPartSlotKey(match.partIndex, parseInt(parts[1], 10), parseInt(parts[2], 10));
+
+      if (!output[targetSlotKey]) {
+        output[targetSlotKey] = {};
+      }
+
+      incrementCount(output[targetSlotKey], match.slots[slotKey], match.similarity);
+    });
+  });
+
+  return output;
+}
+
 function getTransitionBucket(model, styleKey, previousToken) {
   var styleParts = String(styleKey).split("|");
   var typeMeterKey = styleParts.slice(0, 2).join("|");
@@ -669,6 +827,7 @@ function predictChordPath(model, parsedTune) {
   var styleKey = buildStyleKey(parsedTune);
   var measurePatternHints = buildMeasurePatternHints(model, parsedTune);
   var exactMelodyPathHints = buildExactMelodyPathHints(model, parsedTune);
+  var fuzzyPartHints = buildFuzzyPartHints(model, parsedTune);
   var i;
   var j;
 
@@ -677,6 +836,9 @@ function predictChordPath(model, parsedTune) {
     var candidates = getCandidateTokensForSlice(model, parsedTune, slice);
     var measureHintToken = (measurePatternHints[slice.rawBarIndex] || {})[String(slice.beatInBar)];
     var exactHintToken = exactMelodyPathHints[i] || null;
+    var fuzzySlotKey = buildPartSlotKey(slice.partIndex, slice.measureInPart, slice.beatInBar);
+    var fuzzyHintBucket = fuzzyPartHints[fuzzySlotKey] || {};
+    var fuzzyHintToken = selectTopKey(fuzzyHintBucket);
     var changePreference = i === 0 ? 2.4 : scoreChangePreference(model, parsedTune, slice);
 
     if (measureHintToken && candidates.indexOf(measureHintToken) === -1) {
@@ -685,6 +847,10 @@ function predictChordPath(model, parsedTune) {
 
     if (exactHintToken && candidates.indexOf(exactHintToken) === -1) {
       candidates.unshift(exactHintToken);
+    }
+
+    if (fuzzyHintToken && candidates.indexOf(fuzzyHintToken) === -1) {
+      candidates.unshift(fuzzyHintToken);
     }
 
     if (candidates.length === 0) {
@@ -698,6 +864,7 @@ function predictChordPath(model, parsedTune) {
       var sliceContextScore = scoreSliceContext(model, token, parsedTune, slice);
       var measurePatternBonus = 0;
       var exactMelodyBonus = 0;
+      var fuzzyPartBonus = 0;
       var hintedToken = measureHintToken;
 
       if (hintedToken && hintedToken === token) {
@@ -708,10 +875,14 @@ function predictChordPath(model, parsedTune) {
         exactMelodyBonus = 2.2;
       }
 
+      if (fuzzyHintToken && fuzzyHintToken === token) {
+        fuzzyPartBonus = Math.min(2.0, 0.35 * (fuzzyHintBucket[token] || 0));
+      }
+
       if (i === 0) {
         var startTransition = logProbability(getTransitionBucket(model, styleKey, "__START__"), token, 0.8, model.counts.chordTotals);
         currentLayer[token] = {
-          score: (0.85 * emissionScore) + sliceContextScore + (1.05 * startTransition) + measurePatternBonus + exactMelodyBonus,
+          score: (0.85 * emissionScore) + sliceContextScore + (1.05 * startTransition) + measurePatternBonus + exactMelodyBonus + fuzzyPartBonus,
           previous: null
         };
         continue;
@@ -728,7 +899,7 @@ function predictChordPath(model, parsedTune) {
         var transitionScore = logProbability(getTransitionBucket(model, styleKey, previousToken), token, 0.8, model.counts.chordTotals);
         var stayBonus = previousToken === token ? 0.05 : 0;
         var changeBonus = previousToken === token ? (-0.90 * changePreference) : (0.90 * changePreference);
-        var candidateScore = previousLayer[previousToken].score + (0.85 * emissionScore) + sliceContextScore + (1.05 * transitionScore) + stayBonus + measurePatternBonus + changeBonus + exactMelodyBonus;
+        var candidateScore = previousLayer[previousToken].score + (0.85 * emissionScore) + sliceContextScore + (1.05 * transitionScore) + stayBonus + measurePatternBonus + changeBonus + exactMelodyBonus + fuzzyPartBonus;
 
         if (i === parsedTune.beatSlices.length - 1 && token.indexOf("1:") === 0) {
           candidateScore += 0.45;

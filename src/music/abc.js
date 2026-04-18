@@ -676,14 +676,18 @@ function buildPartFingerprints(parsedTune) {
     return parseInt(left, 10) - parseInt(right, 10);
   }).map(function (partIndex) {
     var measures = grouped[partIndex];
-    var ordered = Object.keys(measures).sort(function (left, right) {
+    var orderedKeys = Object.keys(measures).sort(function (left, right) {
       return parseInt(left, 10) - parseInt(right, 10);
-    }).map(function (measureIndex) {
+    });
+    var ordered = orderedKeys.map(function (measureIndex) {
       return "M" + measureIndex + "=" + measures[measureIndex];
     }).join("||");
 
     return {
       partIndex: parseInt(partIndex, 10),
+      measureSignatures: orderedKeys.map(function (measureIndex) {
+        return measures[measureIndex];
+      }),
       fingerprint: ordered
     };
   });
