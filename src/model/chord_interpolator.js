@@ -222,7 +222,171 @@ function scorePartFingerprintSimilarity(targetMeasures, candidateMeasures) {
   );
 }
 
-function trainOnParsedTune(model, parsedTune) {
+function describeBucketLeader(bucket) {
+  var sortedTokens = Object.keys(bucket || {}).sort(function (left, right) {
+    if (bucket[right] !== bucket[left]) {
+      return bucket[right] - bucket[left];
+    }
+
+    if (left === right) {
+      return 0;
+    }
+
+    return left < right ? -1 : 1;
+  });
+
+  if (!sortedTokens.length) {
+    return null;
+  }
+
+  var topToken = sortedTokens[0];
+  var topCount = bucket[topToken] || 0;
+  var secondCount = sortedTokens.length > 1 ? (bucket[sortedTokens[1]] || 0) : 0;
+
+  return {
+    token: topToken,
+    confidence: topCount / Math.max(1, mapSum(bucket)),
+    decisive: topCount > secondCount
+  };
+}
+
+function buildParsedTrainingItem(row, rowIndex) {
+  if (!row || !row.abc || row.abc.indexOf("\"") === -1) {
+    return null;
+  }
+
+  var parsedTune = abcParser.parseAbcTune({
+    abc: row.abc,
+    meter: row.meter,
+    mode: row.mode,
+    type: row.type
+  });
+  var slotBuckets = {};
+  var beatTokens = [];
+
+  parsedTune.beatSlices.forEach(function (slice, index) {
+    var normalized = slice.chord ? theory.normalizeChord(slice.chord.raw, parsedTune.modeInfo) : null;
+    if (!normalized) {
+      return;
+    }
+
+    beatTokens[index] = normalized.token;
+
+    if (slice.isPickup || slice.beatInBar === null) {
+      return;
+    }
+
+    incrementCount(
+      ensureNestedMap(slotBuckets, buildPartSlotKey(slice.partIndex, slice.measureInPart, slice.beatInBar)),
+      normalized.token,
+      1
+    );
+  });
+
+  var slotTokens = {};
+  Object.keys(slotBuckets).forEach(function (slotKey) {
+    slotTokens[slotKey] = selectTopKey(slotBuckets[slotKey]);
+  });
+
+  return {
+    row: row,
+    rowIndex: rowIndex,
+    parsedTune: parsedTune,
+    beatTokens: beatTokens,
+    slotTokens: slotTokens
+  };
+}
+
+function buildConsensusPlans(items) {
+  var groups = {};
+  var plans = items.map(function () {
+    return {
+      tuneWeight: 1,
+      sliceWeights: {}
+    };
+  });
+
+  items.forEach(function (item, index) {
+    var groupKey = item.row && item.row.tune_id ? ("tune:" + item.row.tune_id) : ("row:" + item.rowIndex + ":" + index);
+    if (!groups[groupKey]) {
+      groups[groupKey] = [];
+    }
+
+    groups[groupKey].push({
+      item: item,
+      index: index
+    });
+  });
+
+  Object.keys(groups).forEach(function (groupKey) {
+    var groupItems = groups[groupKey];
+    var slotBuckets = {};
+
+    if (groupItems.length < 2) {
+      return;
+    }
+
+    groupItems.forEach(function (groupItem) {
+      Object.keys(groupItem.item.slotTokens).forEach(function (slotKey) {
+        incrementCount(
+          ensureNestedMap(slotBuckets, slotKey),
+          groupItem.item.slotTokens[slotKey],
+          1
+        );
+      });
+    });
+
+    groupItems.forEach(function (groupItem) {
+      var sliceWeights = {};
+      var matched = 0;
+      var compared = 0;
+      var confidenceSum = 0;
+
+      groupItem.item.parsedTune.beatSlices.forEach(function (slice, sliceIndex) {
+        var token = groupItem.item.beatTokens[sliceIndex];
+        if (!token || slice.isPickup || slice.beatInBar === null) {
+          return;
+        }
+
+        var leader = describeBucketLeader(slotBuckets[buildPartSlotKey(slice.partIndex, slice.measureInPart, slice.beatInBar)]);
+        if (!leader || !leader.decisive) {
+          return;
+        }
+
+        compared += 1;
+        confidenceSum += leader.confidence;
+
+        if (token === leader.token) {
+          matched += 1;
+          sliceWeights[sliceIndex] = clamp(0.95 + (0.35 * leader.confidence), 1.0, 1.30);
+          return;
+        }
+
+        sliceWeights[sliceIndex] = clamp(0.95 - (0.45 * leader.confidence), 0.45, 0.85);
+      });
+
+      if (!compared) {
+        return;
+      }
+
+      plans[groupItem.index] = {
+        tuneWeight: clamp(
+          0.55 + (0.50 * (matched / compared)) + (0.25 * (confidenceSum / compared)),
+          0.70,
+          1.30
+        ),
+        sliceWeights: sliceWeights
+      };
+    });
+  });
+
+  return plans;
+}
+
+function trainOnParsedTune(model, parsedTune, options) {
+  var trainingOptions = options || {};
+  var sliceWeights = trainingOptions.sliceWeights || {};
+  var tuneWeight = trainingOptions.tuneWeight || 1;
   var usableLabels = 0;
   var previousToken = "__START__";
   var previousObservedToken = null;
@@ -239,6 +403,7 @@ function trainOnParsedTune(model, parsedTune) {
     var normalized = slice.chord ? theory.normalizeChord(slice.chord.raw, parsedTune.modeInfo) : null;
     var truthChange = previousObservedToken === null || normalized && normalized.token !== previousObservedToken;
     var onsetKey = onsetLabel(truthChange);
+    var sliceWeight = clamp(tuneWeight * (sliceWeights[i] || 1), 0.35, 1.60);
 
     if (!normalized) {
       hasFullPath = false;
@@ -247,34 +412,34 @@ function trainOnParsedTune(model, parsedTune) {
 
     pathTokens.push(normalized.token);
     usableLabels += 1;
-    incrementCount(model.counts.chordTotals, normalized.token, 1);
-    incrementCount(ensureNestedMap(model.counts.modeChordTotals, parsedTune.modeInfo.modeFamily), normalized.token, 1);
-    incrementCount(ensureNestedMap(model.counts.styleChordTotals, styleKey), normalized.token, 1);
-    incrementCount(ensureNestedMap(model.counts.typeMeterChordTotals, typeMeterKey), normalized.token, 1);
-    incrementCount(ensureNestedMap(model.counts.transitions, previousToken), normalized.token, 1);
-    incrementCount(ensureNestedMap(ensureNestedMap(model.counts.styleTransitions, styleKey), previousToken), normalized.token, 1);
-    incrementCount(ensureNestedMap(ensureNestedMap(model.counts.typeMeterTransitions, typeMeterKey), previousToken), normalized.token, 1);
-    incrementCount(ensureNestedMap(model.counts.positions, buildPositionKey(slice, parsedTune)), normalized.token, 1);
-    incrementCount(ensureNestedMap(model.counts.partPositions, buildPartPositionKey(slice, parsedTune)), normalized.token, 1);
-    incrementCount(ensureNestedMap(model.counts.signatures, buildSignatureKey(slice, parsedTune)), normalized.token, 1);
-    incrementCount(ensureNestedMap(model.counts.measureSignatures, buildMeasureSignatureKey(slice, parsedTune)), normalized.token, 1);
+    incrementCount(model.counts.chordTotals, normalized.token, sliceWeight);
+    incrementCount(ensureNestedMap(model.counts.modeChordTotals, parsedTune.modeInfo.modeFamily), normalized.token, sliceWeight);
+    incrementCount(ensureNestedMap(model.counts.styleChordTotals, styleKey), normalized.token, sliceWeight);
+    incrementCount(ensureNestedMap(model.counts.typeMeterChordTotals, typeMeterKey), normalized.token, sliceWeight);
+    incrementCount(ensureNestedMap(model.counts.transitions, previousToken), normalized.token, sliceWeight);
+    incrementCount(ensureNestedMap(ensureNestedMap(model.counts.styleTransitions, styleKey), previousToken), normalized.token, sliceWeight);
+    incrementCount(ensureNestedMap(ensureNestedMap(model.counts.typeMeterTransitions, typeMeterKey), previousToken), normalized.token, sliceWeight);
+    incrementCount(ensureNestedMap(model.counts.positions, buildPositionKey(slice, parsedTune)), normalized.token, sliceWeight);
+    incrementCount(ensureNestedMap(model.counts.partPositions, buildPartPositionKey(slice, parsedTune)), normalized.token, sliceWeight);
+    incrementCount(ensureNestedMap(model.counts.signatures, buildSignatureKey(slice, parsedTune)), normalized.token, sliceWeight);
+    incrementCount(ensureNestedMap(model.counts.measureSignatures, buildMeasureSignatureKey(slice, parsedTune)), normalized.token, sliceWeight);
     incrementCount(model.counts.tuneTypes, parsedTune.type || "unknown", 1);
-    incrementCount(ensureNestedMap(model.counts.onsetStyles, styleKey), onsetKey, 1);
-    incrementCount(ensureNestedMap(model.counts.typeMeterOnsetStyles, typeMeterKey), onsetKey, 1);
-    incrementCount(ensureNestedMap(model.counts.onsetPositions, buildPositionKey(slice, parsedTune)), onsetKey, 1);
-    incrementCount(ensureNestedMap(model.counts.onsetPartPositions, buildPartPositionKey(slice, parsedTune)), onsetKey, 1);
-    incrementCount(ensureNestedMap(model.counts.onsetSignatures, buildSignatureKey(slice, parsedTune)), onsetKey, 1);
-    incrementCount(ensureNestedMap(model.counts.onsetMeasureSignatures, buildMeasureSignatureKey(slice, parsedTune)), onsetKey, 1);
+    incrementCount(ensureNestedMap(model.counts.onsetStyles, styleKey), onsetKey, sliceWeight);
+    incrementCount(ensureNestedMap(model.counts.typeMeterOnsetStyles, typeMeterKey), onsetKey, sliceWeight);
+    incrementCount(ensureNestedMap(model.counts.onsetPositions, buildPositionKey(slice, parsedTune)), onsetKey, sliceWeight);
+    incrementCount(ensureNestedMap(model.counts.onsetPartPositions, buildPartPositionKey(slice, parsedTune)), onsetKey, sliceWeight);
+    incrementCount(ensureNestedMap(model.counts.onsetSignatures, buildSignatureKey(slice, parsedTune)), onsetKey, sliceWeight);
+    incrementCount(ensureNestedMap(model.counts.onsetMeasureSignatures, buildMeasureSignatureKey(slice, parsedTune)), onsetKey, sliceWeight);
 
     if (truthChange) {
-      incrementCount(ensureNestedMap(model.counts.onsetStyleChordTotals, styleKey), normalized.token, 1);
-      incrementCount(ensureNestedMap(model.counts.onsetPositionChordTotals, buildPartPositionKey(slice, parsedTune)), normalized.token, 1);
-      incrementCount(ensureNestedMap(model.counts.onsetSignatureChordTotals, buildSignatureKey(slice, parsedTune)), normalized.token, 1);
-      incrementCount(ensureNestedMap(model.counts.onsetMeasureSignatureChordTotals, buildMeasureSignatureKey(slice, parsedTune)), normalized.token, 1);
+      incrementCount(ensureNestedMap(model.counts.onsetStyleChordTotals, styleKey), normalized.token, sliceWeight);
+      incrementCount(ensureNestedMap(model.counts.onsetPositionChordTotals, buildPartPositionKey(slice, parsedTune)), normalized.token, sliceWeight);
+      incrementCount(ensureNestedMap(model.counts.onsetSignatureChordTotals, buildSignatureKey(slice, parsedTune)), normalized.token, sliceWeight);
+      incrementCount(ensureNestedMap(model.counts.onsetMeasureSignatureChordTotals, buildMeasureSignatureKey(slice, parsedTune)), normalized.token, sliceWeight);
     }
 
     if (!slice.isPickup && slice.measuresFromPartEnd !== null && slice.measuresFromPartEnd <= 2) {
-      incrementCount(ensureNestedMap(model.counts.cadencePositions, buildCadenceKey(slice, parsedTune)), normalized.token, 1);
+      incrementCount(ensureNestedMap(model.counts.cadencePositions, buildCadenceKey(slice, parsedTune)), normalized.token, sliceWeight);
     }
 
     if (!slice.isPickup && slice.beatInBar !== null) {
@@ -305,22 +470,22 @@ function trainOnParsedTune(model, parsedTune) {
     for (j = 0; j < pcs.length; j += 1) {
       var relativePc = pcs[j];
       var weight = slice.noteWeights[relativePc];
-      incrementCount(emissionBucket, relativePc, weight);
+      incrementCount(emissionBucket, relativePc, weight * sliceWeight);
       totalWeight += weight;
     }
 
-    incrementCount(model.counts.emissionTotals, normalized.token, totalWeight);
+    incrementCount(model.counts.emissionTotals, normalized.token, totalWeight * sliceWeight);
     previousToken = normalized.token;
     previousObservedToken = normalized.token;
   }
 
   Object.keys(measurePatterns).forEach(function (id) {
     var pattern = measurePatterns[id];
-    incrementCount(ensureNestedMap(model.counts.measurePatterns, pattern.key), pattern.beats.join("/"), 1);
+    incrementCount(ensureNestedMap(model.counts.measurePatterns, pattern.key), pattern.beats.join("/"), tuneWeight);
   });
 
   if (usableLabels > 0 && hasFullPath && pathTokens.length === parsedTune.beatSlices.length && parsedTune.melodyFingerprint) {
-    incrementCount(ensureNestedMap(model.counts.exactMelodyPaths, parsedTune.melodyFingerprint), pathTokens.join("/"), 1);
+    incrementCount(ensureNestedMap(model.counts.exactMelodyPaths, parsedTune.melodyFingerprint), pathTokens.join("/"), tuneWeight);
   }
 
   if (usableLabels > 0 && parsedTune.partFingerprints && parsedTune.partFingerprints.length) {
@@ -336,7 +501,8 @@ function trainOnParsedTune(model, parsedTune) {
         modeFamily: parsedTune.modeInfo.modeFamily,
         partIndex: partFingerprint.partIndex,
         measureSignatures: partFingerprint.measureSignatures || [],
-        slots: entry.slots
+        slots: entry.slots,
+        weight: tuneWeight
       });
     });
   }
@@ -350,19 +516,45 @@ function trainOnParsedTune(model, parsedTune) {
 }
 
 function trainOnRow(model, row) {
-  if (!row || !row.abc || row.abc.indexOf("\"") === -1) {
+  var item = buildParsedTrainingItem(row, 0);
+  if (!item) {
     return false;
   }
 
-  var parsedTune = abcParser.parseAbcTune({
-    abc: row.abc,
-    meter: row.meter,
-    mode: row.mode,
-    type: row.type
+  trainOnParsedTune(model, item.parsedTune);
+  return true;
+}
+
+function trainOnRows(model, rows) {
+  var items = [];
+  var trainedRows = 0;
+  var skippedRows = 0;
+
+  (rows || []).forEach(function (row, index) {
+    try {
+      var item = buildParsedTrainingItem(row, index);
+      if (!item) {
+        skippedRows += 1;
+        return;
+      }
+
+      items.push(item);
+    } catch (error) {
+      skippedRows += 1;
+    }
   });
 
-  trainOnParsedTune(model, parsedTune);
-  return true;
+  var consensusPlans = buildConsensusPlans(items);
+
+  items.forEach(function (item, index) {
+    trainOnParsedTune(model, item.parsedTune, consensusPlans[index]);
+    trainedRows += 1;
+  });
+
+  return {
+    trainedRows: trainedRows,
+    skippedRows: skippedRows
+  };
 }
 
 function mapSum(map) {
@@ -412,6 +604,20 @@ function isJigPulseTune(parsedTune) {
   return parsedTune.meterInfo.numerator === 6 &&
     parsedTune.meterInfo.denominator === 8 &&
     typeName === "jig";
+}
+
+function isSimpleMeterPulseTune(parsedTune) {
+  if (isJigPulseTune(parsedTune)) {
+    return false;
+  }
+
+  if (parsedTune.meterInfo.denominator === 8 &&
+      parsedTune.meterInfo.numerator % 3 === 0 &&
+      parsedTune.meterInfo.numerator > 3) {
+    return false;
+  }
+
+  return parsedTune.meterInfo.denominator <= 4;
 }
 
 function beatStrength(slice, meterInfo) {
@@ -561,6 +767,57 @@ function scoreJigPulseFit(token, slice, parsedTune, modeInfo, chordTones, scaleP
   return score;
 }
 
+function scoreSimpleMeterPulseFit(token, slice, parsedTune, modeInfo, chordTones, scalePitchClasses) {
+  if (!isSimpleMeterPulseTune(parsedTune) || !slice.subPulsePcs) {
+    return 0;
+  }
+
+  var onsetPcs = slice.subPulsePcs.onset || [];
+  var middlePcs = slice.subPulsePcs.middle || [];
+  var strength = beatStrength(slice, parsedTune.meterInfo) * rhythmFamilyMultiplier(parsedTune, slice);
+  var onsetChordWeight = 1.25 * strength;
+  var onsetScaleWeight = 0.10 * strength;
+  var onsetClashPenalty = -1.70 * strength;
+  var middleChordWeight = 0.45 * strength;
+  var middleScaleWeight = 0.18;
+  var middleClashPenalty = -0.45 * Math.min(strength, 1.15);
+  var onsetHasChordTone = false;
+  var score = 0;
+  var i;
+
+  for (i = 0; i < onsetPcs.length; i += 1) {
+    if (chordTones.indexOf(onsetPcs[i]) !== -1) {
+      onsetHasChordTone = true;
+    }
+
+    score += scorePitchClassFit(
+      onsetPcs[i],
+      chordTones,
+      scalePitchClasses,
+      onsetChordWeight,
+      onsetScaleWeight,
+      onsetClashPenalty
+    );
+  }
+
+  for (i = 0; i < middlePcs.length; i += 1) {
+    score += scorePitchClassFit(
+      middlePcs[i],
+      chordTones,
+      scalePitchClasses,
+      middleChordWeight,
+      middleScaleWeight,
+      middleClashPenalty
+    );
+  }
+
+  if (strength >= 1.30 && onsetPcs.length && !onsetHasChordTone) {
+    score -= 0.55 * strength;
+  }
+
+  return score;
+}
+
 function scoreEmission(model, token, slice, modeInfo, parsedTune) {
   var pcs = Object.keys(slice.noteWeights);
   if (pcs.length === 0) {
@@ -590,6 +847,7 @@ function scoreEmission(model, token, slice, modeInfo, parsedTune) {
 
   score += scoreStrongBeatOnsetFit(token, slice, parsedTune, modeInfo, chordTones, scalePitchClasses);
   score += scoreJigPulseFit(token, slice, parsedTune, modeInfo, chordTones, scalePitchClasses);
+  score += scoreSimpleMeterPulseFit(token, slice, parsedTune, modeInfo, chordTones, scalePitchClasses);
 
   return score;
 }
@@ -760,7 +1018,8 @@ function buildFuzzyPartHints(model, parsedTune) {
       topMatches.push({
         partIndex: targetPart.partIndex,
         similarity: similarity,
-        slots: entry.slots
+        slots: entry.slots,
+        weight: entry.weight || 1
       });
     });
   });
@@ -778,7 +1037,7 @@ function buildFuzzyPartHints(model, parsedTune) {
         output[targetSlotKey] = {};
       }
 
-      incrementCount(output[targetSlotKey], match.slots[slotKey], match.similarity);
+      incrementCount(output[targetSlotKey], match.slots[slotKey], match.similarity * (match.weight || 1));
     });
   });
 
@@ -963,5 +1222,6 @@ function predictForTune(model, options) {
 module.exports = {
   createEmptyModel: createEmptyModel,
   predictForTune: predictForTune,
-  trainOnRow: trainOnRow
+  trainOnRow: trainOnRow,
+  trainOnRows: trainOnRows
 };

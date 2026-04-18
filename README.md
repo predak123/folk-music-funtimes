@@ -19,6 +19,8 @@ This baseline now combines:
 
 - key-relative chord normalization instead of absolute chord names
 - structural parsing for pickups, parts, and repeated endings
+- consensus-weighted training across multiple settings of the same tune
+- simple-meter pulse scoring so strong-beat onsets matter more than offbeats
 - melody compatibility scoring instead of contextless labels
 - explicit chord change modeling instead of relying only on token transitions
 - full-sequence decoding instead of per-beat independent guesses
@@ -35,19 +37,19 @@ This pass is optimized for single-voice The Session style melody bodies, not eve
 
 For this corpus-focused pass, the parser assumes an eighth-note default unit length for body-only ABC strings. That matches The Session material better than generic ABC fallback rules.
 
-## Current held-out baselines
+## Current held-out baseline
 
 On `2026-04-18`, using:
 
-- `node src/cli.js evaluate --csv data/tunes.csv --limit 10000 --holdout-every 5`
+- `node src/cli.js evaluate --csv data/tunes.csv --limit 10000 --holdout-every 5 --holdout-by tune`
 
 the model reached:
 
-- Row holdout: `50.79%` exact beat, `53.43%` root-only, `78.40%` change placement
-- Tune holdout: `46.39%` exact beat, `48.45%` root-only, `76.12%` change placement
-- Melody-fingerprint holdout: `49.24%` exact beat, `51.54%` root-only, `77.76%` change placement
+- Tune holdout: `53.11%` exact beat, `53.87%` root-only, `78.17%` change placement
+- On chord onsets only: `48.48%` exact, `49.13%` root-only
+- Type highlights: `54.57%` for jigs, `54.10%` for reels, `56.22%` for polkas, `53.14%` for waltzes
 
-This matters because row holdout can still benefit from closely related settings, while tune and melody holdouts tell us more about real generalization.
+This matters because tune holdout is stricter than row holdout and gives a better read on generalization to unseen tunes, not just nearby settings.
 
 ## Commands
 

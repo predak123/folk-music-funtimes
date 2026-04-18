@@ -546,22 +546,26 @@ function collectActivePcs(noteGroups, position) {
 
 function buildSubPulseProfile(parsedTune, window) {
   var beatSpan = window.end - window.start;
-  var pulseOneEnd = window.start + (beatSpan / 3);
-  var pulseThreeStart = window.start + ((beatSpan * 2) / 3);
-  var onsetPcs = collectStartingPcs(parsedTune.noteGroups, window.start, pulseOneEnd);
-  var thirdPcs = collectStartingPcs(parsedTune.noteGroups, pulseThreeStart, window.end);
+  var isCompoundMeter = parsedTune.meterInfo.denominator === 8 &&
+    parsedTune.meterInfo.numerator % 3 === 0 &&
+    parsedTune.meterInfo.numerator > 3;
+  var earlyBoundary = window.start + (isCompoundMeter ? (beatSpan / 3) : (beatSpan / 2));
+  var lateBoundary = window.start + (isCompoundMeter ? ((beatSpan * 2) / 3) : (beatSpan / 2));
+  var onsetPcs = collectStartingPcs(parsedTune.noteGroups, window.start, earlyBoundary);
+  var latePcs = collectStartingPcs(parsedTune.noteGroups, lateBoundary, window.end);
 
   if (!onsetPcs.length) {
     onsetPcs = collectActivePcs(parsedTune.noteGroups, window.start + EPSILON);
   }
 
-  if (!thirdPcs.length) {
-    thirdPcs = collectActivePcs(parsedTune.noteGroups, pulseThreeStart + EPSILON);
+  if (!latePcs.length) {
+    latePcs = collectActivePcs(parsedTune.noteGroups, lateBoundary + EPSILON);
   }
 
   return {
     onset: onsetPcs,
-    third: thirdPcs
+    middle: latePcs,
+    third: latePcs
   };
 }
 

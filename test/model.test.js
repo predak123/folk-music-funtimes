@@ -29,6 +29,40 @@ function run() {
   assert.strictEqual(predictions[0].displayChord, "Am");
   assert.strictEqual(predictions[2].displayChord, "G");
   assert.strictEqual(predictions[predictions.length - 1].displayChord, "Am");
+
+  var consensusModel = modelApi.createEmptyModel();
+  modelApi.trainOnRows(consensusModel, [
+    {
+      tune_id: "shared-1",
+      abc: "\"Am\"EA AB|\"G\"G2 B2|\"Am\"A2 A2|",
+      meter: "2/4",
+      mode: "Adorian",
+      type: "polka"
+    },
+    {
+      tune_id: "shared-1",
+      abc: "\"Am\"EA AB|\"G\"G2 B2|\"Am\"A2 A2|",
+      meter: "2/4",
+      mode: "Adorian",
+      type: "polka"
+    },
+    {
+      tune_id: "shared-1",
+      abc: "\"Am\"EA AB|\"Em\"G2 B2|\"Am\"A2 A2|",
+      meter: "2/4",
+      mode: "Adorian",
+      type: "polka"
+    }
+  ]);
+
+  var consensusPredictions = modelApi.predictForTune(consensusModel, {
+    abc: "EA AB|G2 B2|A2 A2|",
+    meter: "2/4",
+    mode: "Adorian",
+    type: "polka"
+  });
+
+  assert.strictEqual(consensusPredictions[2].displayChord, "G");
 }
 
 module.exports = {

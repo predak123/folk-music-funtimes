@@ -323,14 +323,10 @@ function normalizeChord(rawChord, modeInfo) {
   var qualityText = extractQualityFragment(match[3] || "");
   var quality = "maj";
 
-  if (qualityText.indexOf("sus") !== -1) {
-    quality = "sus";
-  } else if (qualityText.indexOf("dim") !== -1 || qualityText.indexOf("o") !== -1) {
+  if (qualityText.indexOf("dim") !== -1 || qualityText.indexOf("o") !== -1) {
     quality = "dim";
   } else if (qualityText.indexOf("m") !== -1 && qualityText.indexOf("maj") === -1) {
     quality = "min";
-  } else if (qualityText.indexOf("7") !== -1 && qualityText.indexOf("maj7") === -1) {
-    quality = "dom";
   }
 
   var relativeRoot = mod12(rootPc - modeInfo.tonicPc);

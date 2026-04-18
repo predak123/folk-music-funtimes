@@ -156,6 +156,7 @@ function runTrain(commandArgs) {
   var processed = 0;
   var trained = 0;
   var skipped = 0;
+  var rowsToTrain = [];
 
   console.log("Training from " + csvPath);
   if (typeFilter) {
@@ -179,18 +180,18 @@ function runTrain(commandArgs) {
       if (!matchesTypeFilter(row, typeFilter)) {
         return;
       }
-      var trainedThisRow = modelApi.trainOnRow(model, row);
-      if (trainedThisRow) {
-        trained += 1;
-      }
+      rowsToTrain.push(row);
     } catch (error) {
       skipped += 1;
     }
 
     if (processed % 5000 === 0) {
-      console.log("Processed " + processed + " rows. Trained on " + trained + ". Skipped " + skipped + ".");
+      console.log("Processed " + processed + " rows. Queued " + rowsToTrain.length + " training candidates. Skipped " + skipped + ".");
     }
   }).then(function () {
+    var trainingSummary = modelApi.trainOnRows(model, rowsToTrain);
+    trained = trainingSummary.trainedRows;
+    skipped += trainingSummary.skippedRows;
     model.metadata.processedRows = processed;
     model.metadata.skippedRows = skipped;
     io.writeJson(modelPath, model);
@@ -318,6 +319,7 @@ function runEvaluate(commandArgs) {
     var groupOrder = [];
     var model = modelApi.createEmptyModel();
     var trainRows = 0;
+    var trainCandidateRows = [];
     var holdoutRows = [];
 
     eligibleRows.forEach(function (entry) {
@@ -339,15 +341,12 @@ function runEvaluate(commandArgs) {
       }
 
       rows.forEach(function (row) {
-        try {
-          if (modelApi.trainOnRow(model, row)) {
-            trainRows += 1;
-          }
-        } catch (error) {
-          return;
-        }
+        trainCandidateRows.push(row);
       });
     });
+
+    var trainingSummary = modelApi.trainOnRows(model, trainCandidateRows);
+    trainRows = trainingSummary.trainedRows;
 
     var stats = {
       holdoutBy: holdoutBy,
