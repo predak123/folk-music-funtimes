@@ -1,0 +1,11 @@
+{
+  "name": "folk-music-funtimes",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Early JS prototype for ABC chord interpolation using progression-aware statistical decoding.",
+  "scripts": {
+    "test": "node test/run-tests.js",
+    "train:sample": "node src/cli.js train --csv examples/the-session-mini.csv --model artifacts/sample-model.json",
+    "predict:sample": "node src/cli.js predict --model artifacts/sample-model.json --abc examples/input-no-chords.abc --meter 2/4 --mode Adorian --type polka --write-abc artifacts/input-with-chords.abc"
+  }
+}
