@@ -24,14 +24,17 @@ function createEmptyModel() {
       chordTotals: {},
       modeChordTotals: {},
       styleChordTotals: {},
+      typeMeterChordTotals: {},
       transitions: {},
       styleTransitions: {},
+      typeMeterTransitions: {},
       positions: {},
       partPositions: {},
       signatures: {},
       measureSignatures: {},
       measurePatterns: {},
       onsetStyles: {},
+      typeMeterOnsetStyles: {},
       onsetPositions: {},
       onsetPartPositions: {},
       onsetSignatures: {},
@@ -86,6 +89,13 @@ function buildStyleKey(parsedTune) {
   ].join("|");
 }
 
+function buildTypeMeterKey(parsedTune) {
+  return [
+    parsedTune.type || "unknown",
+    parsedTune.meterInfo.raw
+  ].join("|");
+}
+
 function buildSignatureKey(slice, parsedTune) {
   var pcs = Object.keys(slice.noteWeights).sort(function (left, right) {
     var weightDiff = slice.noteWeights[right] - slice.noteWeights[left];
@@ -126,6 +136,7 @@ function buildMeasurePatternKey(slice, parsedTune) {
 function buildCadenceKey(slice, parsedTune) {
   return [
     buildStyleKey(parsedTune),
+    "part" + slice.partIndex,
     slice.measuresFromPartEnd === null ? "na" : Math.min(slice.measuresFromPartEnd, 2),
     slice.beatInBar
   ].join("|");
@@ -166,6 +177,7 @@ function trainOnParsedTune(model, parsedTune) {
   var previousToken = "__START__";
   var previousObservedToken = null;
   var styleKey = buildStyleKey(parsedTune);
+  var typeMeterKey = buildTypeMeterKey(parsedTune);
   var measurePatterns = {};
   var pathTokens = [];
   var hasFullPath = true;
@@ -187,14 +199,17 @@ function trainOnParsedTune(model, parsedTune) {
     incrementCount(model.counts.chordTotals, normalized.token, 1);
     incrementCount(ensureNestedMap(model.counts.modeChordTotals, parsedTune.modeInfo.modeFamily), normalized.token, 1);
     incrementCount(ensureNestedMap(model.counts.styleChordTotals, styleKey), normalized.token, 1);
+    incrementCount(ensureNestedMap(model.counts.typeMeterChordTotals, typeMeterKey), normalized.token, 1);
     incrementCount(ensureNestedMap(model.counts.transitions, previousToken), normalized.token, 1);
     incrementCount(ensureNestedMap(ensureNestedMap(model.counts.styleTransitions, styleKey), previousToken), normalized.token, 1);
+    incrementCount(ensureNestedMap(ensureNestedMap(model.counts.typeMeterTransitions, typeMeterKey), previousToken), normalized.token, 1);
     incrementCount(ensureNestedMap(model.counts.positions, buildPositionKey(slice, parsedTune)), normalized.token, 1);
     incrementCount(ensureNestedMap(model.counts.partPositions, buildPartPositionKey(slice, parsedTune)), normalized.token, 1);
     incrementCount(ensureNestedMap(model.counts.signatures, buildSignatureKey(slice, parsedTune)), normalized.token, 1);
     incrementCount(ensureNestedMap(model.counts.measureSignatures, buildMeasureSignatureKey(slice, parsedTune)), normalized.token, 1);
     incrementCount(model.counts.tuneTypes, parsedTune.type || "unknown", 1);
     incrementCount(ensureNestedMap(model.counts.onsetStyles, styleKey), onsetKey, 1);
+    incrementCount(ensureNestedMap(model.counts.typeMeterOnsetStyles, typeMeterKey), onsetKey, 1);
     incrementCount(ensureNestedMap(model.counts.onsetPositions, buildPositionKey(slice, parsedTune)), onsetKey, 1);
     incrementCount(ensureNestedMap(model.counts.onsetPartPositions, buildPartPositionKey(slice, parsedTune)), onsetKey, 1);
     incrementCount(ensureNestedMap(model.counts.onsetSignatures, buildSignatureKey(slice, parsedTune)), onsetKey, 1);
@@ -321,6 +336,78 @@ function isJigPulseTune(parsedTune) {
     typeName === "jig";
 }
 
+function beatStrength(slice, meterInfo) {
+  if (slice.isPickup || slice.beatInBar === null) {
+    return 0.9;
+  }
+
+  if (meterInfo.denominator === 8 && meterInfo.numerator % 3 === 0 && meterInfo.numerator > 3) {
+    if (slice.beatInBar === 0) {
+      return 1.4;
+    }
+
+    return meterInfo.beatsPerBar > 2 && slice.beatInBar === Math.floor(meterInfo.beatsPerBar / 2) ? 1.0 : 0.8;
+  }
+
+  if (meterInfo.beatsPerBar === 4) {
+    if (slice.beatInBar === 0) {
+      return 1.5;
+    }
+
+    if (slice.beatInBar === 2) {
+      return 1.15;
+    }
+
+    return 0.8;
+  }
+
+  if (meterInfo.beatsPerBar === 3) {
+    return slice.beatInBar === 0 ? 1.45 : 0.8;
+  }
+
+  if (meterInfo.beatsPerBar === 2) {
+    return slice.beatInBar === 0 ? 1.45 : 1.0;
+  }
+
+  return slice.beatInBar === 0 ? 1.35 : 0.9;
+}
+
+function scoreStrongBeatOnsetFit(token, slice, parsedTune, modeInfo, chordTones, scalePitchClasses) {
+  if (!slice.subPulsePcs || !slice.subPulsePcs.onset || !slice.subPulsePcs.onset.length) {
+    return 0;
+  }
+
+  var onsetPcs = slice.subPulsePcs.onset;
+  var strength = beatStrength(slice, parsedTune.meterInfo);
+  var chordWeight = 1.15 * strength;
+  var scaleWeight = 0.12 * strength;
+  var clashPenalty = -1.55 * strength;
+  var score = 0;
+  var hasChordTone = false;
+  var i;
+
+  for (i = 0; i < onsetPcs.length; i += 1) {
+    if (chordTones.indexOf(onsetPcs[i]) !== -1) {
+      hasChordTone = true;
+    }
+
+    score += scorePitchClassFit(
+      onsetPcs[i],
+      chordTones,
+      scalePitchClasses,
+      chordWeight,
+      scaleWeight,
+      clashPenalty
+    );
+  }
+
+  if (strength >= 1.35 && !hasChordTone) {
+    score -= 0.70 * strength;
+  }
+
+  return score;
+}
+
 function scoreJigPulseFit(token, slice, parsedTune, modeInfo, chordTones, scalePitchClasses) {
   if (!isJigPulseTune(parsedTune) || !slice.subPulsePcs) {
     return 0;
@@ -399,6 +486,7 @@ function scoreEmission(model, token, slice, modeInfo, parsedTune) {
     score += weight * ((0.75 * theoryScore) + (0.25 * logProbability(learnedBucket, String(relativePc), 0.5, learnedFallback)));
   }
 
+  score += scoreStrongBeatOnsetFit(token, slice, parsedTune, modeInfo, chordTones, scalePitchClasses);
   score += scoreJigPulseFit(token, slice, parsedTune, modeInfo, chordTones, scalePitchClasses);
 
   return score;
@@ -417,6 +505,7 @@ function mergeCandidateBucket(output, bucket, limit) {
 function getCandidateTokensForSlice(model, parsedTune, slice) {
   var output = [];
   var styleKey = buildStyleKey(parsedTune);
+  var typeMeterKey = buildTypeMeterKey(parsedTune);
   var positionKey = buildPositionKey(slice, parsedTune);
   var partPositionKey = buildPartPositionKey(slice, parsedTune);
   var signatureKey = buildSignatureKey(slice, parsedTune);
@@ -432,6 +521,7 @@ function getCandidateTokensForSlice(model, parsedTune, slice) {
   mergeCandidateBucket(output, model.counts.partPositions[partPositionKey], 10);
   mergeCandidateBucket(output, model.counts.positions[positionKey], 10);
   mergeCandidateBucket(output, model.counts.styleChordTotals[styleKey], 12);
+  mergeCandidateBucket(output, model.counts.typeMeterChordTotals[typeMeterKey], 12);
   mergeCandidateBucket(output, model.counts.modeChordTotals[parsedTune.modeInfo.modeFamily], 12);
   mergeCandidateBucket(output, model.counts.chordTotals, 12);
   mergeCandidateBucket(output, theory.buildDiatonicChordTokens(parsedTune.modeInfo).reduce(function (acc, token) {
@@ -444,6 +534,7 @@ function getCandidateTokensForSlice(model, parsedTune, slice) {
 
 function scoreSliceContext(model, token, parsedTune, slice) {
   var styleKey = buildStyleKey(parsedTune);
+  var typeMeterBucket = model.counts.typeMeterChordTotals[buildTypeMeterKey(parsedTune)] || {};
   var positionBucket = model.counts.positions[buildPositionKey(slice, parsedTune)] || {};
   var partBucket = model.counts.partPositions[buildPartPositionKey(slice, parsedTune)] || {};
   var signatureBucket = model.counts.signatures[buildSignatureKey(slice, parsedTune)] || {};
@@ -456,21 +547,25 @@ function scoreSliceContext(model, token, parsedTune, slice) {
     (slice.measuresFromPartEnd !== null && slice.measuresFromPartEnd <= 2 ? (1.10 * logProbability(cadenceBucket, token, 0.8, measureSignatureBucket)) : 0) +
     (1.25 * logProbability(measureSignatureBucket, token, 0.8, signatureBucket)) +
     (1.10 * logProbability(signatureBucket, token, 0.8, styleBucket)) +
+    (0.75 * logProbability(styleBucket, token, 0.8, typeMeterBucket)) +
+    (0.60 * logProbability(typeMeterBucket, token, 0.8, globalBucket)) +
     (0.75 * logProbability(partBucket, token, 0.8, positionBucket)) +
     (0.60 * logProbability(positionBucket, token, 0.8, styleBucket)) +
-    (0.55 * logProbability(styleBucket, token, 0.8, globalBucket))
+    (0.40 * logProbability(styleBucket, token, 0.8, globalBucket))
   );
 }
 
 function scoreChangePreference(model, parsedTune, slice) {
   var styleBucket = model.counts.onsetStyles[buildStyleKey(parsedTune)] || {};
+  var typeMeterBucket = model.counts.typeMeterOnsetStyles[buildTypeMeterKey(parsedTune)] || {};
   var positionBucket = model.counts.onsetPositions[buildPositionKey(slice, parsedTune)] || {};
   var partBucket = model.counts.onsetPartPositions[buildPartPositionKey(slice, parsedTune)] || {};
   var signatureBucket = model.counts.onsetSignatures[buildSignatureKey(slice, parsedTune)] || {};
   var measureSignatureBucket = model.counts.onsetMeasureSignatures[buildMeasureSignatureKey(slice, parsedTune)] || {};
 
   var changeScore = (
-    (0.55 * logDecisionProbability(styleBucket, "change", 1.1)) +
+    (0.35 * logDecisionProbability(styleBucket, "change", 1.1)) +
+    (0.45 * logDecisionProbability(typeMeterBucket, "change", 1.1)) +
     (0.70 * logDecisionProbability(positionBucket, "change", 1.1)) +
     (0.85 * logDecisionProbability(partBucket, "change", 1.1)) +
     (1.10 * logDecisionProbability(signatureBucket, "change", 1.1)) +
@@ -478,14 +573,15 @@ function scoreChangePreference(model, parsedTune, slice) {
   );
 
   var stayScore = (
-    (0.55 * logDecisionProbability(styleBucket, "stay", 1.1)) +
+    (0.35 * logDecisionProbability(styleBucket, "stay", 1.1)) +
+    (0.45 * logDecisionProbability(typeMeterBucket, "stay", 1.1)) +
     (0.70 * logDecisionProbability(positionBucket, "stay", 1.1)) +
     (0.85 * logDecisionProbability(partBucket, "stay", 1.1)) +
     (1.10 * logDecisionProbability(signatureBucket, "stay", 1.1)) +
     (1.30 * logDecisionProbability(measureSignatureBucket, "stay", 1.1))
   );
 
-  return clamp(changeScore - stayScore, -2.4, 2.4);
+  return clamp(changeScore - stayScore + ((beatStrength(slice, parsedTune.meterInfo) - 1) * 0.35), -2.4, 2.4);
 }
 
 function buildMeasurePatternHints(model, parsedTune) {
@@ -532,16 +628,25 @@ function buildExactMelodyPathHints(model, parsedTune) {
 }
 
 function getTransitionBucket(model, styleKey, previousToken) {
+  var styleParts = String(styleKey).split("|");
+  var typeMeterKey = styleParts.slice(0, 2).join("|");
   var styleTransitions = model.counts.styleTransitions[styleKey] || {};
-  return styleTransitions[previousToken] || model.counts.transitions[previousToken];
+  var typeMeterTransitions = model.counts.typeMeterTransitions[typeMeterKey] || {};
+  return styleTransitions[previousToken] || typeMeterTransitions[previousToken] || model.counts.transitions[previousToken];
 }
 
-function getCandidateTokens(model, modeInfo) {
+function getCandidateTokens(model, parsedTune) {
+  var modeInfo = parsedTune.modeInfo;
   var modeBucket = model.counts.modeChordTotals[modeInfo.modeFamily] || {};
+  var typeMeterBucket = model.counts.typeMeterChordTotals[buildTypeMeterKey(parsedTune)] || {};
   var ranked = Object.keys(modeBucket).sort(function (left, right) {
     return modeBucket[right] - modeBucket[left];
   });
-  var output = ranked.slice(0, 14);
+  var output = [];
+  mergeCandidateBucket(output, typeMeterBucket, 14);
+  Array.prototype.push.apply(output, ranked.slice(0, 14).filter(function (token) {
+    return output.indexOf(token) === -1;
+  }));
   var diatonic = theory.buildDiatonicChordTokens(modeInfo);
   var i;
 
@@ -559,7 +664,7 @@ function getCandidateTokens(model, modeInfo) {
 }
 
 function predictChordPath(model, parsedTune) {
-  var globalCandidates = getCandidateTokens(model, parsedTune.modeInfo);
+  var globalCandidates = getCandidateTokens(model, parsedTune);
   var layers = [];
   var styleKey = buildStyleKey(parsedTune);
   var measurePatternHints = buildMeasurePatternHints(model, parsedTune);
