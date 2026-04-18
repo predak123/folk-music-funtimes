@@ -287,6 +287,17 @@ function parseChordToken(token, modeInfo) {
   };
 }
 
+function extractQualityFragment(text) {
+  var lower = String(text || "").toLowerCase();
+  var stopIndex = lower.search(/[\s(\[{]/);
+
+  if (stopIndex !== -1) {
+    lower = lower.slice(0, stopIndex);
+  }
+
+  return lower.trim();
+}
+
 function normalizeChord(rawChord, modeInfo) {
   var raw = String(rawChord || "").trim();
   if (!raw) {
@@ -309,7 +320,7 @@ function normalizeChord(rawChord, modeInfo) {
     return null;
   }
 
-  var qualityText = (match[3] || "").toLowerCase();
+  var qualityText = extractQualityFragment(match[3] || "");
   var quality = "maj";
 
   if (qualityText.indexOf("sus") !== -1) {

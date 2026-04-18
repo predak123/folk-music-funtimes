@@ -9,6 +9,7 @@ function run() {
   assert.strictEqual(theory.normalizeChord("G", dorian).token, "7:maj");
   assert.strictEqual(theory.normalizeChord("E7", dorian).token, "5:dom");
   assert.strictEqual(theory.normalizeChord("Bb", major).token, "b7:maj");
+  assert.strictEqual(theory.normalizeChord("D(Bm on repeat)", theory.parseMode("Dmajor")).token, "1:maj");
   assert.strictEqual(theory.chordTokenToDisplayName("b7:maj", major), "Bb");
 }
 
