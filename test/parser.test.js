@@ -53,6 +53,16 @@ function run() {
   });
 
   assert.strictEqual(withChords.melodyFingerprint, withoutChords.melodyFingerprint);
+
+  var jig = abc.parseAbcTune({
+    abc: "G2G GAB|A2A ABd|edd gdd|edB dBA|",
+    meter: "6/8",
+    mode: "Gmajor",
+    type: "jig"
+  });
+
+  assert.ok(jig.beatSlices[0].subPulsePcs.onset.length > 0);
+  assert.ok(jig.beatSlices[0].subPulsePcs.third.length > 0);
 }
 
 module.exports = {

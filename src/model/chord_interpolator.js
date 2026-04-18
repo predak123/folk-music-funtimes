@@ -294,7 +294,85 @@ function logDecisionProbability(bucket, label, smoothing) {
   });
 }
 
-function scoreEmission(model, token, slice, modeInfo) {
+function buildScalePitchClassSet(modeInfo) {
+  return modeInfo.scaleSemitones.reduce(function (acc, value) {
+    acc[value] = true;
+    return acc;
+  }, {});
+}
+
+function scorePitchClassFit(relativePc, chordTones, scalePitchClasses, chordWeight, scaleWeight, clashPenalty) {
+  if (chordTones.indexOf(relativePc) !== -1) {
+    return chordWeight;
+  }
+
+  if (scalePitchClasses[relativePc]) {
+    return scaleWeight;
+  }
+
+  return clashPenalty;
+}
+
+function isJigPulseTune(parsedTune) {
+  var typeName = String(parsedTune.type || "").toLowerCase();
+
+  return parsedTune.meterInfo.numerator === 6 &&
+    parsedTune.meterInfo.denominator === 8 &&
+    typeName === "jig";
+}
+
+function scoreJigPulseFit(token, slice, parsedTune, modeInfo, chordTones, scalePitchClasses) {
+  if (!isJigPulseTune(parsedTune) || !slice.subPulsePcs) {
+    return 0;
+  }
+
+  var onsetPcs = slice.subPulsePcs.onset || [];
+  var thirdPcs = slice.subPulsePcs.third || [];
+  var isBarAccent = slice.beatInBar === 0;
+  var onsetChordWeight = isBarAccent ? 2.35 : 1.75;
+  var onsetScaleWeight = isBarAccent ? -0.05 : 0.10;
+  var onsetClashPenalty = isBarAccent ? -2.70 : -2.00;
+  var thirdChordWeight = isBarAccent ? 1.20 : 0.85;
+  var thirdScaleWeight = 0.10;
+  var thirdClashPenalty = isBarAccent ? -1.20 : -0.85;
+  var score = 0;
+  var onsetHasChordTone = false;
+  var i;
+
+  for (i = 0; i < onsetPcs.length; i += 1) {
+    if (chordTones.indexOf(onsetPcs[i]) !== -1) {
+      onsetHasChordTone = true;
+    }
+
+    score += scorePitchClassFit(
+      onsetPcs[i],
+      chordTones,
+      scalePitchClasses,
+      onsetChordWeight,
+      onsetScaleWeight,
+      onsetClashPenalty
+    );
+  }
+
+  for (i = 0; i < thirdPcs.length; i += 1) {
+    score += scorePitchClassFit(
+      thirdPcs[i],
+      chordTones,
+      scalePitchClasses,
+      thirdChordWeight,
+      thirdScaleWeight,
+      thirdClashPenalty
+    );
+  }
+
+  if (isBarAccent && onsetPcs.length && !onsetHasChordTone) {
+    score -= 0.90;
+  }
+
+  return score;
+}
+
+function scoreEmission(model, token, slice, modeInfo, parsedTune) {
   var pcs = Object.keys(slice.noteWeights);
   if (pcs.length === 0) {
     return 0;
@@ -302,13 +380,9 @@ function scoreEmission(model, token, slice, modeInfo) {
 
   var learnedBucket = model.counts.emissions[token] || {};
   var learnedFallback = model.counts.chordTotals;
-  var scalePitchClasses = {};
+  var scalePitchClasses = buildScalePitchClassSet(modeInfo);
   var chordTones = theory.chordTonesForToken(token, modeInfo);
   var i;
-
-  for (i = 0; i < modeInfo.scaleSemitones.length; i += 1) {
-    scalePitchClasses[modeInfo.scaleSemitones[i]] = true;
-  }
 
   var score = 0;
   for (i = 0; i < pcs.length; i += 1) {
@@ -324,6 +398,8 @@ function scoreEmission(model, token, slice, modeInfo) {
 
     score += weight * ((0.75 * theoryScore) + (0.25 * logProbability(learnedBucket, String(relativePc), 0.5, learnedFallback)));
   }
+
+  score += scoreJigPulseFit(token, slice, parsedTune, modeInfo, chordTones, scalePitchClasses);
 
   return score;
 }
@@ -513,7 +589,7 @@ function predictChordPath(model, parsedTune) {
 
     for (j = 0; j < candidates.length; j += 1) {
       var token = candidates[j];
-      var emissionScore = scoreEmission(model, token, slice, parsedTune.modeInfo);
+      var emissionScore = scoreEmission(model, token, slice, parsedTune.modeInfo, parsedTune);
       var sliceContextScore = scoreSliceContext(model, token, parsedTune, slice);
       var measurePatternBonus = 0;
       var exactMelodyBonus = 0;

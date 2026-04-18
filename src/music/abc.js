@@ -498,6 +498,73 @@ function buildBeatWindows(parsedTune) {
   return windows;
 }
 
+function uniqueSortedPcs(map) {
+  return Object.keys(map).map(function (key) {
+    return parseInt(key, 10);
+  }).sort(function (left, right) {
+    return left - right;
+  });
+}
+
+function collectStartingPcs(noteGroups, start, end) {
+  var found = {};
+  var i;
+
+  for (i = 0; i < noteGroups.length; i += 1) {
+    var group = noteGroups[i];
+
+    if (group.start < start - EPSILON || group.start >= end - EPSILON) {
+      continue;
+    }
+
+    group.relativePcs.forEach(function (relativePc) {
+      found[relativePc] = true;
+    });
+  }
+
+  return uniqueSortedPcs(found);
+}
+
+function collectActivePcs(noteGroups, position) {
+  var found = {};
+  var i;
+
+  for (i = 0; i < noteGroups.length; i += 1) {
+    var group = noteGroups[i];
+
+    if (group.start - EPSILON > position || (group.start + group.duration) <= position + EPSILON) {
+      continue;
+    }
+
+    group.relativePcs.forEach(function (relativePc) {
+      found[relativePc] = true;
+    });
+  }
+
+  return uniqueSortedPcs(found);
+}
+
+function buildSubPulseProfile(parsedTune, window) {
+  var beatSpan = window.end - window.start;
+  var pulseOneEnd = window.start + (beatSpan / 3);
+  var pulseThreeStart = window.start + ((beatSpan * 2) / 3);
+  var onsetPcs = collectStartingPcs(parsedTune.noteGroups, window.start, pulseOneEnd);
+  var thirdPcs = collectStartingPcs(parsedTune.noteGroups, pulseThreeStart, window.end);
+
+  if (!onsetPcs.length) {
+    onsetPcs = collectActivePcs(parsedTune.noteGroups, window.start + EPSILON);
+  }
+
+  if (!thirdPcs.length) {
+    thirdPcs = collectActivePcs(parsedTune.noteGroups, pulseThreeStart + EPSILON);
+  }
+
+  return {
+    onset: onsetPcs,
+    third: thirdPcs
+  };
+}
+
 function buildBeatSlices(parsedTune) {
   var beatLength = parsedTune.meterInfo.beatLength;
   var windows = buildBeatWindows(parsedTune);
@@ -510,6 +577,7 @@ function buildBeatSlices(parsedTune) {
     var window = windows[i];
     var noteWeights = {};
     var anchorIndex = null;
+    var subPulseProfile = buildSubPulseProfile(parsedTune, window);
     var j;
 
     while (chordIndex + 1 < parsedTune.chordChanges.length && parsedTune.chordChanges[chordIndex + 1].offset <= window.start + EPSILON) {
@@ -566,6 +634,7 @@ function buildBeatSlices(parsedTune) {
       start: window.start,
       end: window.end,
       noteWeights: noteWeights,
+      subPulsePcs: subPulseProfile,
       chord: parsedTune.chordChanges.length ? parsedTune.chordChanges[chordIndex] : null,
       anchorIndex: anchorIndex
     });
