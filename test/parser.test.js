@@ -25,6 +25,8 @@ function run() {
   assert.ok(secondEnding);
   assert.strictEqual(firstEnding.measureInPart, secondEnding.measureInPart);
   assert.strictEqual(firstEnding.partIndex, secondEnding.partIndex);
+  assert.strictEqual(firstEnding.measuresFromPartEnd, 0);
+  assert.strictEqual(secondEnding.measuresFromPartEnd, 0);
 
   var ornamented = abc.parseAbcTune({
     abc: "uD2|:{F}v[G,2G2]uB>ud c>A B>G|1 E>A F<D {F}G2 uG>uD:|2 E>A F<D {F}G2 (G>E)||",
@@ -35,6 +37,22 @@ function run() {
 
   assert.ok(ornamented.noteGroups.length > 0);
   assert.ok(ornamented.beatSlices.length > 0);
+
+  var withChords = abc.parseAbcTune({
+    abc: "\"Am\"EA AB|\"G\"G2 B2|\"Am\"EA AB|\"G\"G2 dB|\"Am\"A2 A2|",
+    meter: "2/4",
+    mode: "Adorian",
+    type: "polka"
+  });
+
+  var withoutChords = abc.parseAbcTune({
+    abc: "EA AB|G2 B2|EA AB|G2 dB|A2 A2|",
+    meter: "2/4",
+    mode: "Adorian",
+    type: "polka"
+  });
+
+  assert.strictEqual(withChords.melodyFingerprint, withoutChords.melodyFingerprint);
 }
 
 module.exports = {

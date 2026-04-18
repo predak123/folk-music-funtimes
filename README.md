@@ -35,7 +35,7 @@ This pass is optimized for single-voice The Session style melody bodies, not eve
 
 For this corpus-focused pass, the parser assumes an eighth-note default unit length for body-only ABC strings. That matches The Session material better than generic ABC fallback rules.
 
-## Current held-out baseline
+## Current held-out baselines
 
 On `2026-04-18`, using:
 
@@ -43,13 +43,11 @@ On `2026-04-18`, using:
 
 the model reached:
 
-- `51.16%` exact beat accuracy
-- `53.93%` root-only beat accuracy
-- `78.69%` change placement accuracy
-- `45.67%` onset exact accuracy
-- `48.25%` onset root-only accuracy
+- Row holdout: `50.79%` exact beat, `53.43%` root-only, `78.40%` change placement
+- Tune holdout: `46.39%` exact beat, `48.45%` root-only, `76.12%` change placement
+- Melody-fingerprint holdout: `49.24%` exact beat, `51.54%` root-only, `77.76%` change placement
 
-That is still an early baseline, but it is meaningfully stronger than the earlier sub-50% runs.
+This matters because row holdout can still benefit from closely related settings, while tune and melody holdouts tell us more about real generalization.
 
 ## Commands
 
@@ -68,7 +66,21 @@ node src/cli.js train --csv data/tunes.csv --model artifacts/the-session-model.j
 Evaluate on held-out chorded tunes:
 
 ```powershell
-node src/cli.js evaluate --csv data/tunes.csv --limit 10000 --holdout-every 5
+node src/cli.js evaluate --csv data/tunes.csv --limit 10000 --holdout-every 5 --holdout-by row
+```
+
+Evaluate with stricter grouping:
+
+```powershell
+node src/cli.js evaluate --csv data/tunes.csv --limit 10000 --holdout-every 5 --holdout-by tune
+node src/cli.js evaluate --csv data/tunes.csv --limit 10000 --holdout-every 5 --holdout-by melody
+```
+
+Train or evaluate by tune type:
+
+```powershell
+node src/cli.js train --csv data/tunes.csv --model artifacts/reels-model.json --types reel
+node src/cli.js evaluate --csv data/tunes.csv --limit 10000 --holdout-every 5 --holdout-by tune --types jig,reel,polka
 ```
 
 Predict chords for a tune body:
@@ -85,8 +97,8 @@ node test/run-tests.js
 
 ## Next logical improvements
 
-- add true tune-family retrieval as a reranker or fallback
-- learn phrase-level priors across 8-bar A/B part shapes
+- add fuzzy melody retrieval instead of exact fingerprint matching only
+- learn phrase-level priors across fuller 8-bar A/B cadence shapes
 - improve chord spelling and slash-chord handling
 - broaden ABC coverage for more ornaments, ties, and unusual tuplets
-- add evaluation broken out by tune type, meter, and mode
+- add evaluation broken out by meter and mode in addition to tune type

@@ -362,6 +362,31 @@ function assignPartStructure(measures, pickupCount) {
   };
 }
 
+function assignPartTailMetadata(measures) {
+  var partLengths = {};
+
+  measures.forEach(function (measure) {
+    if (measure.isPickup) {
+      return;
+    }
+
+    partLengths[measure.partIndex] = Math.max(partLengths[measure.partIndex] || 0, (measure.measureInPart || 0) + 1);
+  });
+
+  measures.forEach(function (measure) {
+    if (measure.isPickup) {
+      measure.partLength = 0;
+      measure.measuresFromPartEnd = null;
+      measure.isCadenceMeasure = false;
+      return;
+    }
+
+    measure.partLength = partLengths[measure.partIndex] || 0;
+    measure.measuresFromPartEnd = Math.max(0, (measure.partLength - 1) - measure.measureInPart);
+    measure.isCadenceMeasure = measure.measuresFromPartEnd <= 1;
+  });
+}
+
 function buildMeasures(parsedTune, barEvents) {
   var boundaries = [0];
   var endingByStart = {};
@@ -427,6 +452,7 @@ function buildMeasures(parsedTune, barEvents) {
   });
 
   assignPartStructure(measures, pickupDuration > EPSILON ? 1 : 0);
+  assignPartTailMetadata(measures);
 
   return {
     pickupDuration: pickupDuration,
@@ -530,6 +556,9 @@ function buildBeatSlices(parsedTune) {
       measureInPart: measure ? measure.measureInPart : 0,
       partIndex: measure ? measure.partIndex : 0,
       partPass: measure ? measure.partPass : 1,
+      partLength: measure ? measure.partLength : 0,
+      measuresFromPartEnd: measure ? measure.measuresFromPartEnd : null,
+      isCadenceMeasure: !!(measure && measure.isCadenceMeasure),
       endingNumber: measure ? measure.endingNumber : null,
       measureSignature: measure ? measure.signature : "",
       isPickup: !!(measure && measure.isPickup),
@@ -543,6 +572,52 @@ function buildBeatSlices(parsedTune) {
   }
 
   return slices;
+}
+
+function buildMelodyFingerprint(parsedTune) {
+  return parsedTune.measures.filter(function (measure) {
+    return !measure.isPickup;
+  }).map(function (measure) {
+    return [
+      "P" + measure.partIndex,
+      "M" + measure.measureInPart,
+      "S" + measure.signature
+    ].join("=");
+  }).join("||");
+}
+
+function buildPartFingerprints(parsedTune) {
+  var grouped = {};
+
+  parsedTune.measures.forEach(function (measure) {
+    if (measure.isPickup) {
+      return;
+    }
+
+    if (!grouped[measure.partIndex]) {
+      grouped[measure.partIndex] = {};
+    }
+
+    if (!grouped[measure.partIndex][measure.measureInPart]) {
+      grouped[measure.partIndex][measure.measureInPart] = measure.signature;
+    }
+  });
+
+  return Object.keys(grouped).sort(function (left, right) {
+    return parseInt(left, 10) - parseInt(right, 10);
+  }).map(function (partIndex) {
+    var measures = grouped[partIndex];
+    var ordered = Object.keys(measures).sort(function (left, right) {
+      return parseInt(left, 10) - parseInt(right, 10);
+    }).map(function (measureIndex) {
+      return "M" + measureIndex + "=" + measures[measureIndex];
+    }).join("||");
+
+    return {
+      partIndex: parseInt(partIndex, 10),
+      fingerprint: ordered
+    };
+  });
 }
 
 function parseAbcTune(options) {
@@ -765,6 +840,8 @@ function parseAbcTune(options) {
   parsed.measures = measureData.measures;
   parsed.pickupDuration = measureData.pickupDuration;
   parsed.beatSlices = buildBeatSlices(parsed);
+  parsed.melodyFingerprint = buildMelodyFingerprint(parsed);
+  parsed.partFingerprints = buildPartFingerprints(parsed);
 
   return parsed;
 }
@@ -805,6 +882,7 @@ function injectPredictedChords(abcText, predictions) {
 }
 
 module.exports = {
+  buildMelodyFingerprint: buildMelodyFingerprint,
   injectPredictedChords: injectPredictedChords,
   parseAbcTune: parseAbcTune,
   stripChordAnnotations: stripChordAnnotations

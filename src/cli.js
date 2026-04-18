@@ -11,8 +11,8 @@ var DEFAULT_TUNES_URL = "https://raw.githubusercontent.com/adactio/TheSession-da
 function usage() {
   console.log("Usage:");
   console.log("  node src/cli.js download --out data/tunes.csv");
-  console.log("  node src/cli.js train --csv data/tunes.csv --model artifacts/model.json [--limit 50000]");
-  console.log("  node src/cli.js evaluate --csv data/tunes.csv [--limit 20000] [--holdout-every 5]");
+  console.log("  node src/cli.js train --csv data/tunes.csv --model artifacts/model.json [--limit 50000] [--types jig,reel]");
+  console.log("  node src/cli.js evaluate --csv data/tunes.csv [--limit 20000] [--holdout-every 5] [--holdout-by row|tune|melody] [--types jig,reel]");
   console.log("  node src/cli.js predict --model artifacts/model.json --abc examples/input-no-chords.abc --meter 2/4 --mode Adorian --type polka [--write-abc output.abc]");
 }
 
@@ -27,11 +27,107 @@ function rowFromArray(headers, values) {
   return out;
 }
 
+function normalizeTypeName(value) {
+  var text = String(value || "unknown").trim().toLowerCase();
+  return text || "unknown";
+}
+
+function parseTypeFilter(text) {
+  if (!text) {
+    return null;
+  }
+
+  var filter = {};
+  String(text).split(",").forEach(function (piece) {
+    var normalized = normalizeTypeName(piece);
+    if (normalized) {
+      filter[normalized] = true;
+    }
+  });
+
+  return Object.keys(filter).length ? filter : null;
+}
+
+function matchesTypeFilter(row, typeFilter) {
+  if (!typeFilter) {
+    return true;
+  }
+
+  return !!typeFilter[normalizeTypeName(row.type)];
+}
+
+function parseHoldoutBy(value) {
+  var holdoutBy = String(value || "row").toLowerCase();
+
+  if (["row", "tune", "melody"].indexOf(holdoutBy) === -1) {
+    throw new Error("--holdout-by must be row, tune, or melody");
+  }
+
+  return holdoutBy;
+}
+
+function createStatsBucket() {
+  return {
+    evaluatedTunes: 0,
+    skippedTunes: 0,
+    labeledBeats: 0,
+    exactHits: 0,
+    rootHits: 0,
+    changePlacementHits: 0,
+    changeOpportunities: 0,
+    onsetExactHits: 0,
+    onsetRootHits: 0,
+    onsetCount: 0
+  };
+}
+
+function ensureTypeBucket(stats, typeName) {
+  if (!stats.byType[typeName]) {
+    stats.byType[typeName] = createStatsBucket();
+  }
+
+  return stats.byType[typeName];
+}
+
+function updateBeatStats(bucket, predictionToken, truthToken, previousTruthToken, previousPredToken) {
+  bucket.labeledBeats += 1;
+
+  if (predictionToken === truthToken) {
+    bucket.exactHits += 1;
+  }
+
+  if (String(predictionToken).split(":")[0] === String(truthToken).split(":")[0]) {
+    bucket.rootHits += 1;
+  }
+
+  var truthChanged = previousTruthToken === null || truthToken !== previousTruthToken;
+  var predChanged = previousPredToken === null || predictionToken !== previousPredToken;
+
+  if (truthChanged) {
+    bucket.onsetCount += 1;
+
+    if (predictionToken === truthToken) {
+      bucket.onsetExactHits += 1;
+    }
+
+    if (String(predictionToken).split(":")[0] === String(truthToken).split(":")[0]) {
+      bucket.onsetRootHits += 1;
+    }
+  }
+
+  if (previousTruthToken !== null) {
+    bucket.changeOpportunities += 1;
+    if (truthChanged === predChanged) {
+      bucket.changePlacementHits += 1;
+    }
+  }
+}
+
 function formatPredictions(predictions) {
   return predictions.map(function (prediction) {
     return [
-      "bar " + (prediction.barIndex + 1),
-      "beat " + (prediction.beatInBar + 1),
+      prediction.isPickup ? "bar 0" : "bar " + (prediction.barIndex + 1),
+      prediction.isPickup ? "pickup" : "beat " + (prediction.beatInBar + 1),
       prediction.displayChord
     ].join(" | ");
   }).join("\n");
@@ -49,6 +145,7 @@ function runTrain(commandArgs) {
   var csvPath = commandArgs.csv;
   var modelPath = commandArgs.model;
   var limit = commandArgs.limit ? parseInt(commandArgs.limit, 10) : null;
+  var typeFilter = parseTypeFilter(commandArgs.types);
 
   if (!csvPath || !modelPath) {
     throw new Error("train requires --csv and --model");
@@ -61,6 +158,9 @@ function runTrain(commandArgs) {
   var skipped = 0;
 
   console.log("Training from " + csvPath);
+  if (typeFilter) {
+    console.log("Filtering tune types to: " + Object.keys(typeFilter).sort().join(", "));
+  }
 
   return csv.parseCsvFile(csvPath, function (rowValues) {
     if (!headers) {
@@ -76,6 +176,9 @@ function runTrain(commandArgs) {
 
     try {
       var row = rowFromArray(headers, rowValues);
+      if (!matchesTypeFilter(row, typeFilter)) {
+        return;
+      }
       var trainedThisRow = modelApi.trainOnRow(model, row);
       if (trainedThisRow) {
         trained += 1;
@@ -109,6 +212,10 @@ function summarizeEvaluation(stats) {
   }
 
   console.log("Evaluation summary");
+  console.log("  holdout mode: " + stats.holdoutBy);
+  if (stats.typeFilterLabel) {
+    console.log("  type filter: " + stats.typeFilterLabel);
+  }
   console.log("  train rows: " + stats.trainRows);
   console.log("  holdout rows: " + stats.holdoutRows);
   console.log("  evaluated tunes: " + stats.evaluatedTunes);
@@ -119,12 +226,35 @@ function summarizeEvaluation(stats) {
   console.log("  change placement accuracy: " + ratio(stats.changePlacementHits, stats.changeOpportunities));
   console.log("  onset exact accuracy: " + ratio(stats.onsetExactHits, stats.onsetCount));
   console.log("  onset root-only accuracy: " + ratio(stats.onsetRootHits, stats.onsetCount));
+
+  Object.keys(stats.byType || {}).sort().forEach(function (typeName) {
+    var bucket = stats.byType[typeName];
+    console.log("  type " + typeName + ": exact " + ratio(bucket.exactHits, bucket.labeledBeats) +
+      ", root " + ratio(bucket.rootHits, bucket.labeledBeats) +
+      ", change " + ratio(bucket.changePlacementHits, bucket.changeOpportunities) +
+      ", onset " + ratio(bucket.onsetExactHits, bucket.onsetCount) +
+      ", tunes " + bucket.evaluatedTunes);
+  });
+}
+
+function buildHoldoutGroupKey(row, holdoutBy, parsedTune, rowIndex) {
+  if (holdoutBy === "tune") {
+    return "tune:" + String(row.tune_id || rowIndex);
+  }
+
+  if (holdoutBy === "melody") {
+    return "melody:" + String(parsedTune.melodyFingerprint || rowIndex);
+  }
+
+  return "row:" + String(rowIndex);
 }
 
 function runEvaluate(commandArgs) {
   var csvPath = commandArgs.csv;
   var limit = commandArgs.limit ? parseInt(commandArgs.limit, 10) : 20000;
   var holdoutEvery = commandArgs["holdout-every"] ? parseInt(commandArgs["holdout-every"], 10) : 5;
+  var holdoutBy = parseHoldoutBy(commandArgs["holdout-by"]);
+  var typeFilter = parseTypeFilter(commandArgs.types);
 
   if (!csvPath) {
     throw new Error("evaluate requires --csv");
@@ -134,13 +264,15 @@ function runEvaluate(commandArgs) {
     throw new Error("--holdout-every must be 2 or greater");
   }
 
-  var model = modelApi.createEmptyModel();
   var headers = null;
   var chordedIndex = 0;
-  var holdoutRows = [];
-  var trainRows = 0;
+  var eligibleRows = [];
 
   console.log("Preparing held-out evaluation from " + csvPath);
+  if (typeFilter) {
+    console.log("Filtering tune types to: " + Object.keys(typeFilter).sort().join(", "));
+  }
+  console.log("Grouping holdout by " + holdoutBy + ".");
 
   return csv.parseCsvFile(csvPath, function (rowValues) {
     if (!headers) {
@@ -157,39 +289,80 @@ function runEvaluate(commandArgs) {
       return;
     }
 
-    chordedIndex += 1;
-
-    if (chordedIndex % holdoutEvery === 0) {
-      holdoutRows.push(row);
+    if (!matchesTypeFilter(row, typeFilter)) {
       return;
     }
 
+    chordedIndex += 1;
+
     try {
-      if (modelApi.trainOnRow(model, row)) {
-        trainRows += 1;
+      var parsedTune = null;
+      if (holdoutBy === "melody") {
+        parsedTune = abcParser.parseAbcTune({
+          abc: row.abc,
+          meter: row.meter,
+          mode: row.mode,
+          type: row.type
+        });
       }
+
+      eligibleRows.push({
+        row: row,
+        groupKey: buildHoldoutGroupKey(row, holdoutBy, parsedTune, chordedIndex)
+      });
     } catch (error) {
       return;
     }
   }).then(function () {
+    var groupedRows = {};
+    var groupOrder = [];
+    var model = modelApi.createEmptyModel();
+    var trainRows = 0;
+    var holdoutRows = [];
+
+    eligibleRows.forEach(function (entry) {
+      if (!groupedRows[entry.groupKey]) {
+        groupedRows[entry.groupKey] = [];
+        groupOrder.push(entry.groupKey);
+      }
+
+      groupedRows[entry.groupKey].push(entry.row);
+    });
+
+    groupOrder.forEach(function (groupKey, index) {
+      var rows = groupedRows[groupKey];
+      var isHoldout = ((index + 1) % holdoutEvery) === 0;
+
+      if (isHoldout) {
+        Array.prototype.push.apply(holdoutRows, rows);
+        return;
+      }
+
+      rows.forEach(function (row) {
+        try {
+          if (modelApi.trainOnRow(model, row)) {
+            trainRows += 1;
+          }
+        } catch (error) {
+          return;
+        }
+      });
+    });
+
     var stats = {
+      holdoutBy: holdoutBy,
+      typeFilterLabel: typeFilter ? Object.keys(typeFilter).sort().join(", ") : "",
       trainRows: trainRows,
       holdoutRows: holdoutRows.length,
-      evaluatedTunes: 0,
-      skippedTunes: 0,
-      labeledBeats: 0,
-      exactHits: 0,
-      rootHits: 0,
-      changePlacementHits: 0,
-      changeOpportunities: 0,
-      onsetExactHits: 0,
-      onsetRootHits: 0,
-      onsetCount: 0
+      byType: {}
     };
+    var overall = createStatsBucket();
 
     holdoutRows.forEach(function (row) {
       var parsedTruth;
       var predictions;
+      var typeName = normalizeTypeName(row.type);
+      var typeStats = ensureTypeBucket(stats, typeName);
 
       try {
         parsedTruth = abcParser.parseAbcTune({
@@ -206,7 +379,8 @@ function runEvaluate(commandArgs) {
           type: row.type
         });
       } catch (error) {
-        stats.skippedTunes += 1;
+        overall.skippedTunes += 1;
+        typeStats.skippedTunes += 1;
         return;
       }
 
@@ -223,49 +397,25 @@ function runEvaluate(commandArgs) {
         }
 
         evaluatedThisTune = true;
-        stats.labeledBeats += 1;
-
-        if (predictions[i].token === truthChord.token) {
-          stats.exactHits += 1;
-        }
-
-        if (String(predictions[i].token).split(":")[0] === String(truthChord.token).split(":")[0]) {
-          stats.rootHits += 1;
-        }
-
-        var truthChanged = previousTruthToken === null || truthChord.token !== previousTruthToken;
-        var predChanged = previousPredToken === null || predictions[i].token !== previousPredToken;
-
-        if (truthChanged) {
-          stats.onsetCount += 1;
-
-          if (predictions[i].token === truthChord.token) {
-            stats.onsetExactHits += 1;
-          }
-
-          if (String(predictions[i].token).split(":")[0] === String(truthChord.token).split(":")[0]) {
-            stats.onsetRootHits += 1;
-          }
-        }
-
-        if (previousTruthToken !== null) {
-          stats.changeOpportunities += 1;
-          if (truthChanged === predChanged) {
-            stats.changePlacementHits += 1;
-          }
-        }
+        updateBeatStats(overall, predictions[i].token, truthChord.token, previousTruthToken, previousPredToken);
+        updateBeatStats(typeStats, predictions[i].token, truthChord.token, previousTruthToken, previousPredToken);
 
         previousTruthToken = truthChord.token;
         previousPredToken = predictions[i].token;
       }
 
       if (evaluatedThisTune) {
-        stats.evaluatedTunes += 1;
+        overall.evaluatedTunes += 1;
+        typeStats.evaluatedTunes += 1;
       } else {
-        stats.skippedTunes += 1;
+        overall.skippedTunes += 1;
+        typeStats.skippedTunes += 1;
       }
     });
 
+    Object.keys(overall).forEach(function (key) {
+      stats[key] = overall[key];
+    });
     summarizeEvaluation(stats);
   });
 }
