@@ -75,6 +75,13 @@ function run() {
     type: "reel"
   });
 
+  var impliedParts = abc.parseAbcTune({
+    abc: "A2B2 c2d2|e2f2 g2a2|b2a2 g2f2|e2d2 c2B2|A4 B4|c4 d4|e4 f4|g8|d2e2 f2g2|a2b2 a2g2|f2e2 d2c2|B2A2 G2F2|D4 E4|F4 G4|A4 B4|d8|",
+    meter: "4/4",
+    mode: "Gmajor",
+    type: "reel"
+  });
+
   assert.strictEqual(withChords.beatSlices[0].slotProfiles.length, 2);
   assert.ok(withChords.beatSlices[0].slotProfiles[0].noteWeights);
   assert.ok(jig.beatSlices[0].subPulsePcs.onset.length > 0);
@@ -83,6 +90,9 @@ function run() {
   assert.strictEqual(jig.beatSlices[0].slotProfiles[2].label, "late");
   assert.strictEqual(repeatedOnce.canonicalMelodyFingerprint, writtenTwice.canonicalMelodyFingerprint);
   assert.strictEqual(writtenTwice.canonicalTuneMeasureSignatures.length, 8);
+  assert.strictEqual(impliedParts.partFingerprints.length, 2);
+  assert.strictEqual(impliedParts.partFingerprints[0].measureSignatures.length, 8);
+  assert.strictEqual(impliedParts.partFingerprints[1].measureSignatures.length, 8);
 }
 
 module.exports = {

@@ -85,6 +85,8 @@ function run() {
     structuralModel.counts.canonicalMelodyTokens[canonicalParsed.canonicalMelodyFingerprint]["0|0|0"]["1:maj"],
     1
   );
+  assert.ok(Object.keys(structuralModel.counts.partOnsetPatterns).length > 0);
+  assert.ok(structuralModel.counts.fuzzyPartFamilyLibrary.length > 0);
 }
 
 module.exports = {
