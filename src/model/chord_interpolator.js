@@ -1,5 +1,6 @@
 var theory = require("../music/theory");
 var abcParser = require("../music/abc");
+var identityExperimentFlags = null;
 
 function incrementCount(map, key, amount) {
   map[key] = (map[key] || 0) + (amount || 1);
@@ -52,6 +53,10 @@ function createEmptyModel() {
       onsetPositionChordTotals: {},
       onsetSignatureChordTotals: {},
       onsetMeasureSignatureChordTotals: {},
+      typeModeOnsetChordTotals: {},
+      typeModeFunctionTotals: {},
+      modeFunctionTotals: {},
+      modeFunctionTransitions: {},
       exactMelodyPaths: {},
       canonicalMelodyTokens: {},
       canonicalMelodyOnsets: {},
@@ -109,6 +114,27 @@ function buildTypeMeterKey(parsedTune) {
     parsedTune.type || "unknown",
     parsedTune.meterInfo.raw
   ].join("|");
+}
+
+function getIdentityExperimentFlags() {
+  if (identityExperimentFlags) {
+    return identityExperimentFlags;
+  }
+
+  identityExperimentFlags = {};
+
+  String(process.env.CHORD_IDENTITY_TARGETS || "").split(",").forEach(function (piece) {
+    var normalized = String(piece || "").trim().toLowerCase();
+    if (normalized) {
+      identityExperimentFlags[normalized] = true;
+    }
+  });
+
+  return identityExperimentFlags;
+}
+
+function hasIdentityExperimentFlag(flagName) {
+  return !!getIdentityExperimentFlags()[flagName];
 }
 
 function buildSignaturePitchClasses(slice) {
@@ -175,6 +201,16 @@ function buildCadenceKey(slice, parsedTune) {
     buildStyleKey(parsedTune),
     "part" + slice.partIndex,
     slice.measuresFromPartEnd === null ? "na" : Math.min(slice.measuresFromPartEnd, 2),
+    slice.beatInBar
+  ].join("|");
+}
+
+function buildTypeModeIdentityKey(slice, parsedTune) {
+  return [
+    parsedTune.type || "unknown",
+    parsedTune.modeInfo.modeFamily,
+    buildEndingRole(parsedTune, slice.partIndex),
+    slice.measuresFromPartEnd === null ? "na" : Math.min(slice.measuresFromPartEnd, 3),
     slice.beatInBar
   ].join("|");
 }
@@ -275,6 +311,73 @@ function buildLocalSlotKey(measureInPart, beatInBar) {
 
 function getPartFingerprints(parsedTune) {
   return parsedTune.partFingerprints || [];
+}
+
+function harmonicFunctionForToken(token, modeInfo) {
+  var root = String(token || "").split(":")[0];
+  var modeFamily = modeInfo.modeFamily;
+
+  if (modeFamily === "major") {
+    if (["1", "6", "3"].indexOf(root) !== -1) {
+      return "tonic";
+    }
+    if (["2", "4"].indexOf(root) !== -1) {
+      return "predominant";
+    }
+    if (["5", "7"].indexOf(root) !== -1) {
+      return "dominant";
+    }
+    return "modal";
+  }
+
+  if (modeFamily === "minor") {
+    if (["1", "6"].indexOf(root) !== -1) {
+      return "tonic";
+    }
+    if (["2", "4"].indexOf(root) !== -1) {
+      return "predominant";
+    }
+    if (["3", "5", "7"].indexOf(root) !== -1) {
+      return "dominant";
+    }
+    return "modal";
+  }
+
+  if (modeFamily === "dorian") {
+    if (["1", "6"].indexOf(root) !== -1) {
+      return "tonic";
+    }
+    if (["2", "4"].indexOf(root) !== -1) {
+      return "predominant";
+    }
+    if (["3", "5", "7"].indexOf(root) !== -1) {
+      return "dominant";
+    }
+    return "modal";
+  }
+
+  if (modeFamily === "mixolydian") {
+    if (["1", "6"].indexOf(root) !== -1) {
+      return "tonic";
+    }
+    if (["2", "4"].indexOf(root) !== -1) {
+      return "predominant";
+    }
+    if (["5", "7"].indexOf(root) !== -1) {
+      return "dominant";
+    }
+    return "modal";
+  }
+
+  return "other";
+}
+
+function isTonicToken(token, modeInfo) {
+  if (modeInfo.modeFamily === "minor" || modeInfo.modeFamily === "dorian") {
+    return token === "1:min";
+  }
+
+  return token === "1:maj";
 }
 
 function scorePartFingerprintSimilarity(targetMeasures, candidateMeasures) {
@@ -634,6 +737,7 @@ function trainOnParsedTune(model, parsedTune, options) {
   var usableLabels = 0;
   var previousToken = "__START__";
   var previousObservedToken = null;
+  var previousObservedFunction = "__START__";
   var previousOnsetKey = "__START__";
   var styleKey = buildStyleKey(parsedTune);
   var typeMeterKey = buildTypeMeterKey(parsedTune);
@@ -649,6 +753,7 @@ function trainOnParsedTune(model, parsedTune, options) {
   for (i = 0; i < parsedTune.beatSlices.length; i += 1) {
     var slice = parsedTune.beatSlices[i];
     var normalized = slice.chord ? theory.normalizeChord(slice.chord.raw, parsedTune.modeInfo) : null;
+    var harmonicFunction = normalized ? harmonicFunctionForToken(normalized.token, parsedTune.modeInfo) : null;
     var truthChange = previousObservedToken === null || normalized && normalized.token !== previousObservedToken;
     var onsetKey = onsetLabel(truthChange);
     var sliceWeight = clamp(tuneWeight * (sliceWeights[i] || 1), 0.35, 1.60);
@@ -683,6 +788,10 @@ function trainOnParsedTune(model, parsedTune, options) {
     incrementCount(ensureNestedMap(ensureNestedMap(model.counts.typeMeterOnsetTransitions, typeMeterKey), previousOnsetKey), onsetKey, sliceWeight);
 
     if (truthChange) {
+      incrementCount(ensureNestedMap(model.counts.typeModeOnsetChordTotals, buildTypeModeIdentityKey(slice, parsedTune)), normalized.token, sliceWeight);
+      incrementCount(ensureNestedMap(model.counts.typeModeFunctionTotals, buildTypeModeIdentityKey(slice, parsedTune)), harmonicFunction, sliceWeight);
+      incrementCount(ensureNestedMap(model.counts.modeFunctionTotals, parsedTune.modeInfo.modeFamily), harmonicFunction, sliceWeight);
+      incrementCount(ensureNestedMap(ensureNestedMap(model.counts.modeFunctionTransitions, parsedTune.modeInfo.modeFamily), previousObservedFunction), harmonicFunction, sliceWeight);
       incrementCount(ensureNestedMap(model.counts.onsetStyleChordTotals, styleKey), normalized.token, sliceWeight);
       incrementCount(ensureNestedMap(model.counts.onsetPositionChordTotals, buildPartPositionKey(slice, parsedTune)), normalized.token, sliceWeight);
       incrementCount(ensureNestedMap(model.counts.onsetSignatureChordTotals, buildSignatureKey(slice, parsedTune)), normalized.token, sliceWeight);
@@ -784,6 +893,9 @@ function trainOnParsedTune(model, parsedTune, options) {
 
     previousToken = normalized.token;
     previousObservedToken = normalized.token;
+    if (truthChange) {
+      previousObservedFunction = harmonicFunction;
+    }
     previousOnsetKey = onsetKey;
   }
 
@@ -1044,6 +1156,12 @@ function buildDecoderProfile(parsedTune) {
     partFamilyOnsetWeight: 0.42,
     onsetPathWeight: 0.22,
     onsetPathTransitionWeight: 0.52,
+    typeModeIdentityWeight: 0,
+    harmonicFunctionWeight: 0,
+    harmonicTransitionWeight: 0,
+    minorPenultimateWeight: 0,
+    cadenceTonicRerankWeight: 0,
+    cadenceTonicRerankMargin: 0.55,
     fuzzyHintWeight: 0.35,
     finalTonicBonus: 0.45,
     slotTheoryWeight: 0.72,
@@ -1123,6 +1241,32 @@ function buildDecoderProfile(parsedTune) {
         middle: 0.42,
         late: 0.86
       }
+    });
+  }
+
+  if (hasIdentityExperimentFlag("type_mode_identity")) {
+    applyOverrides({
+      typeModeIdentityWeight: 0.52
+    });
+  }
+
+  if (hasIdentityExperimentFlag("harmonic_function")) {
+    applyOverrides({
+      harmonicFunctionWeight: 0.34,
+      harmonicTransitionWeight: 0.22
+    });
+  }
+
+  if (hasIdentityExperimentFlag("minor_penultimate")) {
+    applyOverrides({
+      minorPenultimateWeight: 0.44
+    });
+  }
+
+  if (hasIdentityExperimentFlag("cadence_tonic_rerank")) {
+    applyOverrides({
+      cadenceTonicRerankWeight: 0.56,
+      cadenceTonicRerankMargin: 0.48
     });
   }
 
@@ -1462,8 +1606,119 @@ function scoreEndingFinalOnset(model, token, parsedTune, slice) {
 
   var endingBucket = model.counts.endingFinalOnsetTokens[buildEndingFinalOnsetKey(slice, parsedTune)] || {};
   var fallbackBucket = model.counts.cadencePositions[buildCadenceKey(slice, parsedTune)] || model.counts.styleChordTotals[buildStyleKey(parsedTune)] || {};
-
   return 0.85 * logProbability(endingBucket, token, 0.7, fallbackBucket);
+}
+
+function scoreTypeModeIdentity(model, token, parsedTune, slice, predictedOnsetLabel, decoderProfile) {
+  var bucket;
+  var fallbackBucket;
+
+  if (predictedOnsetLabel !== "change" || !decoderProfile.typeModeIdentityWeight) {
+    return 0;
+  }
+
+  bucket = model.counts.typeModeOnsetChordTotals[buildTypeModeIdentityKey(slice, parsedTune)] || {};
+  fallbackBucket = model.counts.onsetPositionChordTotals[buildPartPositionKey(slice, parsedTune)] ||
+    model.counts.onsetStyleChordTotals[buildStyleKey(parsedTune)] ||
+    model.counts.modeChordTotals[parsedTune.modeInfo.modeFamily] || {};
+
+  return decoderProfile.typeModeIdentityWeight * logProbability(bucket, token, 0.8, fallbackBucket);
+}
+
+function scoreHarmonicFunction(model, token, parsedTune, slice, predictedOnsetLabel, previousToken, decoderProfile) {
+  var functionName;
+  var functionBucket;
+  var fallbackBucket;
+  var transitionScore = 0;
+
+  if (predictedOnsetLabel !== "change" || (!decoderProfile.harmonicFunctionWeight && !decoderProfile.harmonicTransitionWeight)) {
+    return 0;
+  }
+
+  functionName = harmonicFunctionForToken(token, parsedTune.modeInfo);
+  functionBucket = model.counts.typeModeFunctionTotals[buildTypeModeIdentityKey(slice, parsedTune)] || {};
+  fallbackBucket = model.counts.modeFunctionTotals[parsedTune.modeInfo.modeFamily] || {};
+
+  if (previousToken && previousToken !== "__START__" && decoderProfile.harmonicTransitionWeight) {
+    transitionScore = decoderProfile.harmonicTransitionWeight * logProbability(
+      (model.counts.modeFunctionTransitions[parsedTune.modeInfo.modeFamily] || {})[harmonicFunctionForToken(previousToken, parsedTune.modeInfo)] || {},
+      functionName,
+      0.8,
+      fallbackBucket
+    );
+  }
+
+  return (decoderProfile.harmonicFunctionWeight * logProbability(functionBucket, functionName, 0.8, fallbackBucket)) + transitionScore;
+}
+
+function scoreMinorPenultimateRerank(token, parsedTune, slice, predictedOnsetLabel, decoderProfile) {
+  var modeFamily = parsedTune.modeInfo.modeFamily;
+
+  if (!decoderProfile.minorPenultimateWeight ||
+      predictedOnsetLabel !== "change" ||
+      slice.measuresFromPartEnd !== 1 ||
+      ["minor", "dorian"].indexOf(modeFamily) === -1) {
+    return 0;
+  }
+
+  if (isTonicToken(token, parsedTune.modeInfo)) {
+    return -1 * decoderProfile.minorPenultimateWeight;
+  }
+
+  if (harmonicFunctionForToken(token, parsedTune.modeInfo) === "dominant") {
+    return 0.58 * decoderProfile.minorPenultimateWeight;
+  }
+
+  return 0;
+}
+
+function applyCadenceTonicRerank(currentLayer, slice, parsedTune, predictedOnsetLabel, decoderProfile) {
+  var tonicToken;
+  var orderedTokens;
+  var bestToken;
+  var bestNonTonicToken = null;
+  var bestNonTonicScore = -Infinity;
+  var i;
+
+  if (!decoderProfile.cadenceTonicRerankWeight ||
+      predictedOnsetLabel !== "change" ||
+      slice.measuresFromPartEnd === null ||
+      slice.measuresFromPartEnd > 1) {
+    return;
+  }
+
+  tonicToken = parsedTune.modeInfo.modeFamily === "minor" || parsedTune.modeInfo.modeFamily === "dorian" ? "1:min" : "1:maj";
+  orderedTokens = Object.keys(currentLayer || {}).sort(function (left, right) {
+    return currentLayer[right].score - currentLayer[left].score;
+  });
+  if (!orderedTokens.length) {
+    return;
+  }
+
+  bestToken = orderedTokens[0];
+  if (bestToken !== tonicToken) {
+    return;
+  }
+
+  for (i = 0; i < orderedTokens.length; i += 1) {
+    if (orderedTokens[i] === tonicToken) {
+      continue;
+    }
+
+    if (currentLayer[orderedTokens[i]].score > bestNonTonicScore) {
+      bestNonTonicScore = currentLayer[orderedTokens[i]].score;
+      bestNonTonicToken = orderedTokens[i];
+    }
+  }
+
+  if (!bestNonTonicToken) {
+    return;
+  }
+
+  if ((currentLayer[tonicToken].score - bestNonTonicScore) <= decoderProfile.cadenceTonicRerankMargin) {
+    currentLayer[tonicToken].score -= decoderProfile.cadenceTonicRerankWeight;
+    currentLayer[bestNonTonicToken].score += 0.55 * decoderProfile.cadenceTonicRerankWeight;
+  }
 }
 
 function scoreChangePreference(model, parsedTune, slice) {
@@ -2093,6 +2348,7 @@ function predictChordPath(model, parsedTune) {
   for (i = 0; i < parsedTune.beatSlices.length; i += 1) {
     var slice = parsedTune.beatSlices[i];
     var candidates = getCandidateTokensForSlice(model, parsedTune, slice);
+    var predictedOnsetLabel = predictedOnsetPath[i] || null;
     var measureHintToken = (measurePatternHints[slice.rawBarIndex] || {})[String(slice.beatInBar)];
     var previousMeasureHintToken = null;
     var fuzzySlotKey = buildPartSlotKey(slice.partIndex, slice.measureInPart, slice.beatInBar);
@@ -2200,9 +2456,9 @@ function predictChordPath(model, parsedTune) {
       changePreference -= 0.24;
     }
 
-    if (predictedOnsetPath[i] === "change") {
+    if (predictedOnsetLabel === "change") {
       changePreference += decoderProfile.onsetPathWeight;
-    } else if (predictedOnsetPath[i] === "stay") {
+    } else if (predictedOnsetLabel === "stay") {
       changePreference -= decoderProfile.onsetPathWeight;
     }
 
@@ -2228,6 +2484,10 @@ function predictChordPath(model, parsedTune) {
       candidates.unshift(endingTokenHint);
     }
 
+    if (predictedOnsetLabel === "change" && decoderProfile.typeModeIdentityWeight) {
+      mergeCandidateBucket(candidates, model.counts.typeModeOnsetChordTotals[buildTypeModeIdentityKey(slice, parsedTune)], 10);
+    }
+
     if (candidates.length === 0) {
       candidates = globalCandidates;
     }
@@ -2238,6 +2498,9 @@ function predictChordPath(model, parsedTune) {
       var emissionScore = scoreEmission(model, token, slice, parsedTune.modeInfo, parsedTune, decoderProfile);
       var sliceContextScore = scoreSliceContext(model, token, parsedTune, slice);
       var endingFinalOnsetScore = scoreEndingFinalOnset(model, token, parsedTune, slice);
+      var typeModeIdentityScore = scoreTypeModeIdentity(model, token, parsedTune, slice, predictedOnsetLabel, decoderProfile);
+      var harmonicFunctionScore = scoreHarmonicFunction(model, token, parsedTune, slice, predictedOnsetLabel, "__START__", decoderProfile);
+      var minorPenultimateScore = scoreMinorPenultimateRerank(token, parsedTune, slice, predictedOnsetLabel, decoderProfile);
       var measurePatternBonus = 0;
       var exactMelodyBonus = 0;
       var canonicalMelodyBonus = 0;
@@ -2271,7 +2534,7 @@ function predictChordPath(model, parsedTune) {
       if (i === 0) {
         var startTransition = logProbability(getTransitionBucket(model, styleKey, "__START__"), token, 0.8, model.counts.chordTotals);
         currentLayer[token] = {
-          score: (decoderProfile.emissionWeight * emissionScore) + (decoderProfile.contextWeight * sliceContextScore) + endingFinalOnsetScore + (decoderProfile.startTransitionWeight * startTransition) + measurePatternBonus + exactMelodyBonus + canonicalMelodyBonus + fuzzyPartBonus + endingTokenBonus,
+          score: (decoderProfile.emissionWeight * emissionScore) + (decoderProfile.contextWeight * sliceContextScore) + endingFinalOnsetScore + typeModeIdentityScore + harmonicFunctionScore + minorPenultimateScore + (decoderProfile.startTransitionWeight * startTransition) + measurePatternBonus + exactMelodyBonus + canonicalMelodyBonus + fuzzyPartBonus + endingTokenBonus,
           previous: null
         };
         continue;
@@ -2288,7 +2551,7 @@ function predictChordPath(model, parsedTune) {
         var transitionScore = logProbability(getTransitionBucket(model, styleKey, previousToken), token, 0.8, model.counts.chordTotals);
         var stayBonus = previousToken === token ? decoderProfile.stayBonus : 0;
         var changeBonus = previousToken === token ? (-1 * changePreference) : changePreference;
-        var candidateScore = previousLayer[previousToken].score + (decoderProfile.emissionWeight * emissionScore) + (decoderProfile.contextWeight * sliceContextScore) + endingFinalOnsetScore + (decoderProfile.transitionWeight * transitionScore) + stayBonus + changeBonus + measurePatternBonus + exactMelodyBonus + canonicalMelodyBonus + fuzzyPartBonus + endingTokenBonus;
+        var candidateScore = previousLayer[previousToken].score + (decoderProfile.emissionWeight * emissionScore) + (decoderProfile.contextWeight * sliceContextScore) + endingFinalOnsetScore + typeModeIdentityScore + scoreHarmonicFunction(model, token, parsedTune, slice, predictedOnsetLabel, previousToken, decoderProfile) + minorPenultimateScore + (decoderProfile.transitionWeight * transitionScore) + stayBonus + changeBonus + measurePatternBonus + exactMelodyBonus + canonicalMelodyBonus + fuzzyPartBonus + endingTokenBonus;
 
         if (i === parsedTune.beatSlices.length - 1 && token.indexOf("1:") === 0) {
           candidateScore += decoderProfile.finalTonicBonus;
@@ -2305,6 +2568,8 @@ function predictChordPath(model, parsedTune) {
         previous: bestPrevious
       };
     }
+
+    applyCadenceTonicRerank(currentLayer, slice, parsedTune, predictedOnsetLabel, decoderProfile);
 
     layers.push(currentLayer);
   }

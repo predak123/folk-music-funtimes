@@ -362,8 +362,9 @@ function assignPartStructure(measures, pickupCount) {
   };
 }
 
-function assignPartTailMetadata(measures) {
+function assignPartTailMetadata(measures, pickupDuration, barLength) {
   var partLengths = {};
+  var lastMeasureByPass = {};
 
   measures.forEach(function (measure) {
     if (measure.isPickup) {
@@ -371,6 +372,7 @@ function assignPartTailMetadata(measures) {
     }
 
     partLengths[measure.partIndex] = Math.max(partLengths[measure.partIndex] || 0, (measure.measureInPart || 0) + 1);
+    lastMeasureByPass[measure.partIndex + "|" + measure.partPass] = measure;
   });
 
   measures.forEach(function (measure) {
@@ -378,12 +380,30 @@ function assignPartTailMetadata(measures) {
       measure.partLength = 0;
       measure.measuresFromPartEnd = null;
       measure.isCadenceMeasure = false;
+      measure.isPickupComplement = false;
       return;
     }
 
     measure.partLength = partLengths[measure.partIndex] || 0;
     measure.measuresFromPartEnd = Math.max(0, (measure.partLength - 1) - measure.measureInPart);
     measure.isCadenceMeasure = measure.measuresFromPartEnd <= 1;
+    measure.isPickupComplement = false;
+  });
+
+  if (pickupDuration <= EPSILON) {
+    return;
+  }
+
+  Object.keys(lastMeasureByPass).forEach(function (passKey) {
+    var lastMeasure = lastMeasureByPass[passKey];
+
+    if (!lastMeasure || lastMeasure.duration >= barLength - EPSILON) {
+      return;
+    }
+
+    if (Math.abs((lastMeasure.duration + pickupDuration) - barLength) <= EPSILON * 8) {
+      lastMeasure.isPickupComplement = true;
+    }
   });
 }
 
@@ -452,7 +472,7 @@ function buildMeasures(parsedTune, barEvents) {
   });
 
   assignPartStructure(measures, pickupDuration > EPSILON ? 1 : 0);
-  assignPartTailMetadata(measures);
+  assignPartTailMetadata(measures, pickupDuration, parsedTune.meterInfo.barLength);
 
   return {
     pickupDuration: pickupDuration,
@@ -687,6 +707,7 @@ function buildBeatSlices(parsedTune) {
       partLength: measure ? measure.partLength : 0,
       measuresFromPartEnd: measure ? measure.measuresFromPartEnd : null,
       isCadenceMeasure: !!(measure && measure.isCadenceMeasure),
+      isPickupComplement: !!(measure && measure.isPickupComplement),
       endingNumber: measure ? measure.endingNumber : null,
       measureSignature: measure ? measure.signature : "",
       isPickup: !!(measure && measure.isPickup),

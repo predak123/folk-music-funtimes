@@ -81,6 +81,12 @@ function run() {
     mode: "Gmajor",
     type: "reel"
   });
+  var pickupComplement = abc.parseAbcTune({
+    abc: "e2|A2B2 c2d2|e2f2 g2a2|b2a2 g2f2|e2d2 c2B2|A4 B4|c4 d4|e4 f4|A2B2 c2|",
+    meter: "4/4",
+    mode: "Gmajor",
+    type: "reel"
+  });
 
   assert.strictEqual(withChords.beatSlices[0].slotProfiles.length, 2);
   assert.ok(withChords.beatSlices[0].slotProfiles[0].noteWeights);
@@ -93,6 +99,23 @@ function run() {
   assert.strictEqual(impliedParts.partFingerprints.length, 2);
   assert.strictEqual(impliedParts.partFingerprints[0].measureSignatures.length, 8);
   assert.strictEqual(impliedParts.partFingerprints[1].measureSignatures.length, 8);
+
+  var pickupMeasure = pickupComplement.measures[0];
+  var lastMeasure = pickupComplement.measures[pickupComplement.measures.length - 1];
+  var penultimateMeasure = pickupComplement.measures[pickupComplement.measures.length - 2];
+  var lastMeasureSlices = pickupComplement.beatSlices.filter(function (slice) {
+    return slice.measureNumber === lastMeasure.measureNumber;
+  });
+
+  assert.strictEqual(pickupMeasure.measureNumber, 0);
+  assert.strictEqual(lastMeasure.measureNumber, 8);
+  assert.strictEqual(lastMeasure.isPickupComplement, true);
+  assert.strictEqual(lastMeasure.measuresFromPartEnd, 0);
+  assert.strictEqual(penultimateMeasure.measuresFromPartEnd, 1);
+  assert.strictEqual(lastMeasureSlices.length, 3);
+  assert.deepStrictEqual(lastMeasureSlices.map(function (slice) {
+    return slice.beatInBar;
+  }), [0, 1, 2]);
 }
 
 module.exports = {
