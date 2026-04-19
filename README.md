@@ -21,6 +21,7 @@ This baseline now combines:
 - structural parsing for pickups, parts, and repeated endings
 - canonical part fingerprints so repeated-pass spellings collapse to the same structural tune shape
 - consensus-weighted training across multiple settings of the same tune
+- cross-setting consensus weighting that rewards agreement on chord onsets as well as chord labels
 - consensus slot maps across repeated passes instead of letting the last written pass win
 - slot-level beat parsing so strong-beat onsets matter more than weak-note motion
 - per-type decoder profiles for reels, jigs, polkas, waltzes, and related families
@@ -53,9 +54,9 @@ On `2026-04-18`, using:
 
 the model reached:
 
-- Tune holdout: `54.42%` exact beat, `55.16%` root-only, `79.44%` change placement
-- On chord onsets only: `49.95%` exact, `50.60%` root-only
-- Type highlights: `54.46%` for jigs, `55.54%` for reels, `56.88%` for polkas, `54.57%` for waltzes
+- Tune holdout: `54.45%` exact beat, `55.20%` root-only, `79.49%` change placement
+- On chord onsets only: `50.03%` exact, `50.69%` root-only
+- Type highlights: `54.56%` for jigs, `55.57%` for reels, `56.78%` for polkas, `54.56%` for waltzes
 
 This matters because tune holdout is stricter than row holdout and gives a better read on generalization to unseen tunes, not just nearby settings.
 

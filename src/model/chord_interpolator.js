@@ -445,7 +445,10 @@ function buildParsedTrainingItem(row, rowIndex) {
     type: row.type
   });
   var slotBuckets = {};
+  var onsetBuckets = {};
   var beatTokens = [];
+  var beatOnsets = [];
+  var previousToken = null;
 
   parsedTune.beatSlices.forEach(function (slice, index) {
     var normalized = slice.chord ? theory.normalizeChord(slice.chord.raw, parsedTune.modeInfo) : null;
@@ -454,6 +457,8 @@ function buildParsedTrainingItem(row, rowIndex) {
     }
 
     beatTokens[index] = normalized.token;
+    beatOnsets[index] = previousToken === null || previousToken !== normalized.token ? "change" : "stay";
+    previousToken = normalized.token;
 
     if (slice.isPickup || slice.beatInBar === null) {
       return;
@@ -464,11 +469,20 @@ function buildParsedTrainingItem(row, rowIndex) {
       normalized.token,
       1
     );
+    incrementCount(
+      ensureNestedMap(onsetBuckets, buildPartSlotKey(slice.partIndex, slice.measureInPart, slice.beatInBar)),
+      beatOnsets[index],
+      1
+    );
   });
 
   var slotTokens = {};
+  var slotOnsets = {};
   Object.keys(slotBuckets).forEach(function (slotKey) {
     slotTokens[slotKey] = selectTopKey(slotBuckets[slotKey]);
+  });
+  Object.keys(onsetBuckets).forEach(function (slotKey) {
+    slotOnsets[slotKey] = selectTopKey(onsetBuckets[slotKey]);
   });
 
   return {
@@ -476,7 +490,9 @@ function buildParsedTrainingItem(row, rowIndex) {
     rowIndex: rowIndex,
     parsedTune: parsedTune,
     beatTokens: beatTokens,
-    slotTokens: slotTokens
+    beatOnsets: beatOnsets,
+    slotTokens: slotTokens,
+    slotOnsets: slotOnsets
   };
 }
 
@@ -504,6 +520,7 @@ function buildConsensusPlans(items) {
   Object.keys(groups).forEach(function (groupKey) {
     var groupItems = groups[groupKey];
     var slotBuckets = {};
+    var onsetBuckets = {};
 
     if (groupItems.length < 2) {
       return;
@@ -517,6 +534,13 @@ function buildConsensusPlans(items) {
           1
         );
       });
+      Object.keys(groupItem.item.slotOnsets).forEach(function (slotKey) {
+        incrementCount(
+          ensureNestedMap(onsetBuckets, slotKey),
+          groupItem.item.slotOnsets[slotKey],
+          1
+        );
+      });
     });
 
     groupItems.forEach(function (groupItem) {
@@ -524,15 +548,31 @@ function buildConsensusPlans(items) {
       var matched = 0;
       var compared = 0;
       var confidenceSum = 0;
+      var onsetMatched = 0;
+      var onsetCompared = 0;
+      var onsetConfidenceSum = 0;
 
       groupItem.item.parsedTune.beatSlices.forEach(function (slice, sliceIndex) {
         var token = groupItem.item.beatTokens[sliceIndex];
+        var onset = groupItem.item.beatOnsets[sliceIndex];
         if (!token || slice.isPickup || slice.beatInBar === null) {
           return;
         }
 
-        var leader = describeBucketLeader(slotBuckets[buildPartSlotKey(slice.partIndex, slice.measureInPart, slice.beatInBar)]);
+        var slotKey = buildPartSlotKey(slice.partIndex, slice.measureInPart, slice.beatInBar);
+        var leader = describeBucketLeader(slotBuckets[slotKey]);
+        var onsetLeader = describeBucketLeader(onsetBuckets[slotKey]);
         if (!leader || !leader.decisive) {
+          if (onsetLeader && onsetLeader.decisive && onset) {
+            onsetCompared += 1;
+            onsetConfidenceSum += onsetLeader.confidence;
+            if (onset === onsetLeader.token) {
+              onsetMatched += 1;
+              sliceWeights[sliceIndex] = clamp(0.92 + (0.22 * onsetLeader.confidence), 0.95, 1.18);
+            } else {
+              sliceWeights[sliceIndex] = clamp(0.88 - (0.30 * onsetLeader.confidence), 0.55, 0.88);
+            }
+          }
           return;
         }
 
@@ -541,22 +581,43 @@ function buildConsensusPlans(items) {
 
         if (token === leader.token) {
           matched += 1;
-          sliceWeights[sliceIndex] = clamp(0.95 + (0.35 * leader.confidence), 1.0, 1.30);
-          return;
+          sliceWeights[sliceIndex] = clamp(0.94 + (0.40 * leader.confidence), 1.0, 1.34);
+        } else {
+          sliceWeights[sliceIndex] = clamp(0.92 - (0.52 * leader.confidence), 0.35, 0.84);
         }
 
-        sliceWeights[sliceIndex] = clamp(0.95 - (0.45 * leader.confidence), 0.45, 0.85);
+        if (onsetLeader && onsetLeader.decisive && onset) {
+          onsetCompared += 1;
+          onsetConfidenceSum += onsetLeader.confidence;
+          if (onset === onsetLeader.token) {
+            onsetMatched += 1;
+            sliceWeights[sliceIndex] = clamp(sliceWeights[sliceIndex] + (0.08 + (0.10 * onsetLeader.confidence)), 0.35, 1.40);
+          } else {
+            sliceWeights[sliceIndex] = clamp(sliceWeights[sliceIndex] - (0.10 + (0.12 * onsetLeader.confidence)), 0.30, 1.40);
+          }
+        }
       });
 
-      if (!compared) {
+      if (!compared && !onsetCompared) {
         return;
       }
 
+      var tokenAgreement = compared ? (matched / compared) : 0.5;
+      var onsetAgreement = onsetCompared ? (onsetMatched / onsetCompared) : 0.5;
+      var tokenConfidence = compared ? (confidenceSum / compared) : 0.5;
+      var onsetConfidence = onsetCompared ? (onsetConfidenceSum / onsetCompared) : 0.5;
+      var groupSizeBonus = Math.min(groupItems.length, 5) * 0.06;
+
       plans[groupItem.index] = {
         tuneWeight: clamp(
-          0.55 + (0.50 * (matched / compared)) + (0.25 * (confidenceSum / compared)),
-          0.70,
-          1.30
+          0.42 +
+            (0.46 * tokenAgreement) +
+            (0.22 * tokenConfidence) +
+            (0.22 * onsetAgreement) +
+            (0.14 * onsetConfidence) +
+            groupSizeBonus,
+          0.58,
+          1.48
         ),
         sliceWeights: sliceWeights
       };
