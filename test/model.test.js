@@ -89,6 +89,12 @@ function run() {
   assert.ok(Object.keys(structuralModel.counts.typeModeFunctionTotals).length > 0);
   assert.ok(Object.keys(structuralModel.counts.cadenceOnsetPositions).length > 0);
   assert.ok(Object.keys(structuralModel.counts.cadenceOnsetChordTotals).length > 0);
+  assert.ok(Object.keys(structuralModel.counts.rolePositions).length > 0);
+  assert.ok(Object.keys(structuralModel.counts.phrasePositions).length > 0);
+  assert.ok(Object.keys(structuralModel.counts.onsetRolePositions).length > 0);
+  assert.ok(Object.keys(structuralModel.counts.onsetPhrasePositions).length > 0);
+  assert.ok(Object.keys(structuralModel.counts.onsetRolePositionChordTotals).length > 0);
+  assert.ok(Object.keys(structuralModel.counts.onsetPhraseChordTotals).length > 0);
   assert.ok(Object.keys(structuralModel.counts.partOnsetPatterns).length > 0);
   assert.ok(structuralModel.counts.fuzzyPartFamilyLibrary.length > 0);
 }
