@@ -47,6 +47,9 @@ function createEmptyModel() {
       endingFinalOnsetTokens: {},
       onsetStyles: {},
       typeMeterOnsetStyles: {},
+      styleBeatOnsetStyles: {},
+      typeMeterBeatOnsetStyles: {},
+      roleBeatOnsetStyles: {},
       onsetPositions: {},
       onsetPartPositions: {},
       onsetRolePositions: {},
@@ -157,10 +160,32 @@ function buildStyleKey(parsedTune) {
   ].join("|");
 }
 
+function buildStyleBeatKey(slice, parsedTune) {
+  return [
+    buildStyleKey(parsedTune),
+    slice.beatInBar
+  ].join("|");
+}
+
 function buildTypeMeterKey(parsedTune) {
   return [
     parsedTune.type || "unknown",
     parsedTune.meterInfo.raw
+  ].join("|");
+}
+
+function buildTypeMeterBeatKey(slice, parsedTune) {
+  return [
+    buildTypeMeterKey(parsedTune),
+    slice.beatInBar
+  ].join("|");
+}
+
+function buildRoleBeatKey(slice, parsedTune) {
+  return [
+    buildStyleKey(parsedTune),
+    buildEndingRole(parsedTune, slice.partIndex),
+    slice.beatInBar
   ].join("|");
 }
 
@@ -957,6 +982,11 @@ function trainOnParsedTune(model, parsedTune, options) {
     incrementCount(model.counts.tuneTypes, parsedTune.type || "unknown", 1);
     incrementCount(ensureNestedMap(model.counts.onsetStyles, styleKey), onsetKey, sliceWeight);
     incrementCount(ensureNestedMap(model.counts.typeMeterOnsetStyles, typeMeterKey), onsetKey, sliceWeight);
+    if (slice.beatInBar !== null) {
+      incrementCount(ensureNestedMap(model.counts.styleBeatOnsetStyles, buildStyleBeatKey(slice, parsedTune)), onsetKey, sliceWeight);
+      incrementCount(ensureNestedMap(model.counts.typeMeterBeatOnsetStyles, buildTypeMeterBeatKey(slice, parsedTune)), onsetKey, sliceWeight);
+      incrementCount(ensureNestedMap(model.counts.roleBeatOnsetStyles, buildRoleBeatKey(slice, parsedTune)), onsetKey, sliceWeight);
+    }
     incrementCount(ensureNestedMap(model.counts.onsetPositions, buildPositionKey(slice, parsedTune)), onsetKey, sliceWeight);
     incrementCount(ensureNestedMap(model.counts.onsetPartPositions, buildPartPositionKey(slice, parsedTune)), onsetKey, sliceWeight);
     incrementCount(ensureNestedMap(model.counts.onsetRolePositions, buildRolePartPositionKey(slice, parsedTune)), onsetKey, sliceWeight);
@@ -1542,7 +1572,21 @@ function beatStrength(slice, meterInfo) {
       return 1.4;
     }
 
-    return meterInfo.beatsPerBar > 2 && slice.beatInBar === Math.floor(meterInfo.beatsPerBar / 2) ? 1.0 : 0.8;
+    if (meterInfo.beatsPerBar === 2 && slice.beatInBar === 1) {
+      return 1.18;
+    }
+
+    if (meterInfo.beatsPerBar === 3) {
+      if (slice.beatInBar === 1) {
+        return 1.08;
+      }
+
+      if (slice.beatInBar === 2) {
+        return 1.00;
+      }
+    }
+
+    return meterInfo.beatsPerBar > 2 && slice.beatInBar === Math.floor(meterInfo.beatsPerBar / 2) ? 1.0 : 0.82;
   }
 
   if (meterInfo.beatsPerBar === 4) {
@@ -1570,6 +1614,16 @@ function beatStrength(slice, meterInfo) {
 
 function rhythmFamilyMultiplier(parsedTune, slice) {
   var typeName = String(parsedTune.type || "").toLowerCase();
+
+  if (parsedTune.meterInfo.raw === "6/8" && ["jig", "slide"].indexOf(typeName) !== -1) {
+    if (slice.beatInBar === 0) {
+      return 1.22;
+    }
+
+    if (slice.beatInBar === 1) {
+      return 1.16;
+    }
+  }
 
   if (parsedTune.meterInfo.raw === "4/4" && ["reel", "hornpipe", "strathspey", "march"].indexOf(typeName) !== -1) {
     if (slice.beatInBar === 0) {
@@ -2075,6 +2129,9 @@ function applyCadenceTonicRerank(model, currentLayer, slice, parsedTune, predict
 function scoreChangePreference(model, parsedTune, slice) {
   var styleBucket = model.counts.onsetStyles[buildStyleKey(parsedTune)] || {};
   var typeMeterBucket = model.counts.typeMeterOnsetStyles[buildTypeMeterKey(parsedTune)] || {};
+  var styleBeatBucket = slice.beatInBar === null ? {} : (model.counts.styleBeatOnsetStyles[buildStyleBeatKey(slice, parsedTune)] || {});
+  var typeMeterBeatBucket = slice.beatInBar === null ? {} : (model.counts.typeMeterBeatOnsetStyles[buildTypeMeterBeatKey(slice, parsedTune)] || {});
+  var roleBeatBucket = slice.beatInBar === null ? {} : (model.counts.roleBeatOnsetStyles[buildRoleBeatKey(slice, parsedTune)] || {});
   var positionBucket = model.counts.onsetPositions[buildPositionKey(slice, parsedTune)] || {};
   var partBucket = model.counts.onsetPartPositions[buildPartPositionKey(slice, parsedTune)] || {};
   var roleBucket = model.counts.onsetRolePositions[buildRolePartPositionKey(slice, parsedTune)] || {};
@@ -2085,6 +2142,9 @@ function scoreChangePreference(model, parsedTune, slice) {
   var changeScore = (
     (0.35 * logDecisionProbability(styleBucket, "change", 1.1)) +
     (0.45 * logDecisionProbability(typeMeterBucket, "change", 1.1)) +
+    (0.36 * logDecisionProbability(styleBeatBucket, "change", 1.1)) +
+    (0.55 * logDecisionProbability(typeMeterBeatBucket, "change", 1.1)) +
+    (0.32 * logDecisionProbability(roleBeatBucket, "change", 1.1)) +
     (0.00 * logDecisionProbability(phraseBucket, "change", 1.1)) +
     (0.42 * logDecisionProbability(roleBucket, "change", 1.1)) +
     (0.70 * logDecisionProbability(positionBucket, "change", 1.1)) +
@@ -2096,6 +2156,9 @@ function scoreChangePreference(model, parsedTune, slice) {
   var stayScore = (
     (0.35 * logDecisionProbability(styleBucket, "stay", 1.1)) +
     (0.45 * logDecisionProbability(typeMeterBucket, "stay", 1.1)) +
+    (0.36 * logDecisionProbability(styleBeatBucket, "stay", 1.1)) +
+    (0.55 * logDecisionProbability(typeMeterBeatBucket, "stay", 1.1)) +
+    (0.32 * logDecisionProbability(roleBeatBucket, "stay", 1.1)) +
     (0.00 * logDecisionProbability(phraseBucket, "stay", 1.1)) +
     (0.42 * logDecisionProbability(roleBucket, "stay", 1.1)) +
     (0.70 * logDecisionProbability(positionBucket, "stay", 1.1)) +

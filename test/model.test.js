@@ -104,6 +104,9 @@ function run() {
   assert.ok(Object.keys(structuralModel.counts.cadenceFunctionTotals).length > 0);
   assert.ok(Object.keys(structuralModel.counts.cadenceFunctionTransitions).length > 0);
   assert.ok(Object.keys(structuralModel.counts.cadenceTokenTransitions).length > 0);
+  assert.ok(Object.keys(structuralModel.counts.styleBeatOnsetStyles).length > 0);
+  assert.ok(Object.keys(structuralModel.counts.typeMeterBeatOnsetStyles).length > 0);
+  assert.ok(Object.keys(structuralModel.counts.roleBeatOnsetStyles).length > 0);
   assert.ok(Object.keys(structuralModel.counts.rolePositions).length > 0);
   assert.ok(Object.keys(structuralModel.counts.phrasePositions).length > 0);
   assert.ok(Object.keys(structuralModel.counts.onsetRolePositions).length > 0);
