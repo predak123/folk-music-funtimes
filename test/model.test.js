@@ -68,6 +68,7 @@ function run() {
   var upgradedModel = modelApi.createEmptyModel();
   delete upgradedModel.counts.cadenceFunctionTotals;
   delete upgradedModel.counts.cadenceFunctionTransitions;
+  delete upgradedModel.counts.cadenceTokenTransitions;
   var upgradedPredictions = modelApi.predictForTune(upgradedModel, {
     abc: "EA AB|G2 B2|EA AB|G2 dB|A2 A2|",
     meter: "2/4",
@@ -102,6 +103,7 @@ function run() {
   assert.ok(Object.keys(structuralModel.counts.cadenceOnsetChordTotals).length > 0);
   assert.ok(Object.keys(structuralModel.counts.cadenceFunctionTotals).length > 0);
   assert.ok(Object.keys(structuralModel.counts.cadenceFunctionTransitions).length > 0);
+  assert.ok(Object.keys(structuralModel.counts.cadenceTokenTransitions).length > 0);
   assert.ok(Object.keys(structuralModel.counts.rolePositions).length > 0);
   assert.ok(Object.keys(structuralModel.counts.phrasePositions).length > 0);
   assert.ok(Object.keys(structuralModel.counts.onsetRolePositions).length > 0);
