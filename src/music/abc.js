@@ -544,27 +544,82 @@ function collectActivePcs(noteGroups, position) {
   return uniqueSortedPcs(found);
 }
 
-function buildSubPulseProfile(parsedTune, window) {
-  var beatSpan = window.end - window.start;
+function collectWindowNoteWeights(noteGroups, start, end) {
+  var noteWeights = {};
+  var i;
+
+  for (i = 0; i < noteGroups.length; i += 1) {
+    var group = noteGroups[i];
+    var overlapStart = Math.max(group.start, start);
+    var overlapEnd = Math.min(group.start + group.duration, end);
+    var overlap = overlapEnd - overlapStart;
+    var j;
+
+    if (overlap <= EPSILON) {
+      continue;
+    }
+
+    for (j = 0; j < group.relativePcs.length; j += 1) {
+      var relativePc = group.relativePcs[j];
+      noteWeights[relativePc] = (noteWeights[relativePc] || 0) + overlap;
+    }
+  }
+
+  return noteWeights;
+}
+
+function buildSlotLabel(slotCount, slotIndex) {
+  if (slotCount === 3) {
+    return ["onset", "middle", "late"][slotIndex] || ("slot" + slotIndex);
+  }
+
+  if (slotCount === 2) {
+    return slotIndex === 0 ? "onset" : "off";
+  }
+
+  return slotIndex === 0 ? "onset" : ("slot" + slotIndex);
+}
+
+function buildSlotProfiles(parsedTune, window) {
   var isCompoundMeter = parsedTune.meterInfo.denominator === 8 &&
     parsedTune.meterInfo.numerator % 3 === 0 &&
     parsedTune.meterInfo.numerator > 3;
-  var earlyBoundary = window.start + (isCompoundMeter ? (beatSpan / 3) : (beatSpan / 2));
-  var lateBoundary = window.start + (isCompoundMeter ? ((beatSpan * 2) / 3) : (beatSpan / 2));
-  var onsetPcs = collectStartingPcs(parsedTune.noteGroups, window.start, earlyBoundary);
-  var latePcs = collectStartingPcs(parsedTune.noteGroups, lateBoundary, window.end);
+  var slotCount = isCompoundMeter ? 3 : 2;
+  var beatSpan = window.end - window.start;
+  var slots = [];
+  var i;
 
-  if (!onsetPcs.length) {
-    onsetPcs = collectActivePcs(parsedTune.noteGroups, window.start + EPSILON);
+  for (i = 0; i < slotCount; i += 1) {
+    var slotStart = window.start + ((beatSpan * i) / slotCount);
+    var slotEnd = window.start + ((beatSpan * (i + 1)) / slotCount);
+    var startingPcs = collectStartingPcs(parsedTune.noteGroups, slotStart, slotEnd);
+
+    if (!startingPcs.length) {
+      startingPcs = collectActivePcs(parsedTune.noteGroups, slotStart + EPSILON);
+    }
+
+    slots.push({
+      index: i,
+      label: buildSlotLabel(slotCount, i),
+      start: slotStart,
+      end: slotEnd,
+      startingPcs: startingPcs,
+      noteWeights: collectWindowNoteWeights(parsedTune.noteGroups, slotStart, slotEnd)
+    });
   }
 
-  if (!latePcs.length) {
-    latePcs = collectActivePcs(parsedTune.noteGroups, lateBoundary + EPSILON);
-  }
+  return slots;
+}
+
+function buildSubPulseProfile(parsedTune, window, slots) {
+  var slotProfiles = slots || buildSlotProfiles(parsedTune, window);
+  var onsetPcs = slotProfiles[0] ? slotProfiles[0].startingPcs : [];
+  var middlePcs = slotProfiles[1] ? slotProfiles[1].startingPcs : [];
+  var latePcs = slotProfiles[2] ? slotProfiles[2].startingPcs : middlePcs;
 
   return {
     onset: onsetPcs,
-    middle: latePcs,
+    middle: middlePcs,
     third: latePcs
   };
 }
@@ -581,7 +636,8 @@ function buildBeatSlices(parsedTune) {
     var window = windows[i];
     var noteWeights = {};
     var anchorIndex = null;
-    var subPulseProfile = buildSubPulseProfile(parsedTune, window);
+    var slotProfiles = buildSlotProfiles(parsedTune, window);
+    var subPulseProfile = buildSubPulseProfile(parsedTune, window, slotProfiles);
     var j;
 
     while (chordIndex + 1 < parsedTune.chordChanges.length && parsedTune.chordChanges[chordIndex + 1].offset <= window.start + EPSILON) {
@@ -638,6 +694,7 @@ function buildBeatSlices(parsedTune) {
       start: window.start,
       end: window.end,
       noteWeights: noteWeights,
+      slotProfiles: slotProfiles,
       subPulsePcs: subPulseProfile,
       chord: parsedTune.chordChanges.length ? parsedTune.chordChanges[chordIndex] : null,
       anchorIndex: anchorIndex

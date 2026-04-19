@@ -61,8 +61,12 @@ function run() {
     type: "jig"
   });
 
+  assert.strictEqual(withChords.beatSlices[0].slotProfiles.length, 2);
+  assert.ok(withChords.beatSlices[0].slotProfiles[0].noteWeights);
   assert.ok(jig.beatSlices[0].subPulsePcs.onset.length > 0);
   assert.ok(jig.beatSlices[0].subPulsePcs.third.length > 0);
+  assert.strictEqual(jig.beatSlices[0].slotProfiles.length, 3);
+  assert.strictEqual(jig.beatSlices[0].slotProfiles[2].label, "late");
 }
 
 module.exports = {
