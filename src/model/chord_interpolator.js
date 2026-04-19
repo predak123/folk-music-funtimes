@@ -34,6 +34,9 @@ function createEmptyModel() {
       measureSignatures: {},
       measurePatterns: {},
       onsetMeasurePatterns: {},
+      endingTokenPatterns: {},
+      endingOnsetPatterns: {},
+      endingFinalOnsetTokens: {},
       onsetStyles: {},
       typeMeterOnsetStyles: {},
       onsetPositions: {},
@@ -164,6 +167,47 @@ function buildCadenceKey(slice, parsedTune) {
     buildStyleKey(parsedTune),
     "part" + slice.partIndex,
     slice.measuresFromPartEnd === null ? "na" : Math.min(slice.measuresFromPartEnd, 2),
+    slice.beatInBar
+  ].join("|");
+}
+
+function buildEndingRole(parsedTune, partIndex) {
+  var partCount = (parsedTune.partFingerprints && parsedTune.partFingerprints.length) || 1;
+
+  if (partCount <= 1) {
+    return "single";
+  }
+
+  if (partIndex === 0) {
+    return "first";
+  }
+
+  if (partIndex === partCount - 1) {
+    return "final";
+  }
+
+  return "middle";
+}
+
+function buildEndingPatternKey(slice, parsedTune) {
+  return [
+    buildStyleKey(parsedTune),
+    buildEndingRole(parsedTune, slice.partIndex),
+    Math.min(slice.partLength || 0, 16)
+  ].join("|");
+}
+
+function buildEndingPatternSlotId(slice) {
+  return [
+    Math.min(slice.measuresFromPartEnd === null ? 9 : slice.measuresFromPartEnd, 1),
+    slice.beatInBar
+  ].join("|");
+}
+
+function buildEndingFinalOnsetKey(slice, parsedTune) {
+  return [
+    buildStyleKey(parsedTune),
+    buildEndingRole(parsedTune, slice.partIndex),
     slice.beatInBar
   ].join("|");
 }
@@ -469,6 +513,8 @@ function trainOnParsedTune(model, parsedTune, options) {
   var typeMeterKey = buildTypeMeterKey(parsedTune);
   var measurePatterns = {};
   var onsetMeasurePatterns = {};
+  var endingTokenPatterns = {};
+  var endingOnsetPatterns = {};
   var pathTokens = [];
   var hasFullPath = true;
   var partLibraryEntries = {};
@@ -512,6 +558,14 @@ function trainOnParsedTune(model, parsedTune, options) {
       incrementCount(ensureNestedMap(model.counts.onsetPositionChordTotals, buildPartPositionKey(slice, parsedTune)), normalized.token, sliceWeight);
       incrementCount(ensureNestedMap(model.counts.onsetSignatureChordTotals, buildSignatureKey(slice, parsedTune)), normalized.token, sliceWeight);
       incrementCount(ensureNestedMap(model.counts.onsetMeasureSignatureChordTotals, buildMeasureSignatureKey(slice, parsedTune)), normalized.token, sliceWeight);
+
+      if (!slice.isPickup && slice.measuresFromPartEnd === 0) {
+        incrementCount(
+          ensureNestedMap(model.counts.endingFinalOnsetTokens, buildEndingFinalOnsetKey(slice, parsedTune)),
+          normalized.token,
+          sliceWeight
+        );
+      }
     }
 
     if (!slice.isPickup && slice.measuresFromPartEnd !== null && slice.measuresFromPartEnd <= 2) {
@@ -535,6 +589,25 @@ function trainOnParsedTune(model, parsedTune, options) {
         };
       }
       onsetMeasurePatterns[measurePatternId].beats.push(String(slice.beatInBar) + "=" + onsetKey);
+
+      if (slice.measuresFromPartEnd !== null && slice.measuresFromPartEnd <= 1) {
+        var endingPatternId = buildEndingPatternKey(slice, parsedTune) + "|" + slice.partIndex + "|" + slice.partPass;
+        if (!endingTokenPatterns[endingPatternId]) {
+          endingTokenPatterns[endingPatternId] = {
+            key: buildEndingPatternKey(slice, parsedTune),
+            beats: []
+          };
+        }
+        if (!endingOnsetPatterns[endingPatternId]) {
+          endingOnsetPatterns[endingPatternId] = {
+            key: buildEndingPatternKey(slice, parsedTune),
+            beats: []
+          };
+        }
+
+        endingTokenPatterns[endingPatternId].beats.push(buildEndingPatternSlotId(slice) + "=" + normalized.token);
+        endingOnsetPatterns[endingPatternId].beats.push(buildEndingPatternSlotId(slice) + "=" + onsetKey);
+      }
 
       if (!partLibraryEntries[slice.partIndex]) {
         partLibraryEntries[slice.partIndex] = {
@@ -581,6 +654,16 @@ function trainOnParsedTune(model, parsedTune, options) {
   Object.keys(onsetMeasurePatterns).forEach(function (id) {
     var onsetPattern = onsetMeasurePatterns[id];
     incrementCount(ensureNestedMap(model.counts.onsetMeasurePatterns, onsetPattern.key), onsetPattern.beats.join("/"), tuneWeight);
+  });
+
+  Object.keys(endingTokenPatterns).forEach(function (id) {
+    var endingTokenPattern = endingTokenPatterns[id];
+    incrementCount(ensureNestedMap(model.counts.endingTokenPatterns, endingTokenPattern.key), endingTokenPattern.beats.join("/"), tuneWeight);
+  });
+
+  Object.keys(endingOnsetPatterns).forEach(function (id) {
+    var endingOnsetPattern = endingOnsetPatterns[id];
+    incrementCount(ensureNestedMap(model.counts.endingOnsetPatterns, endingOnsetPattern.key), endingOnsetPattern.beats.join("/"), tuneWeight);
   });
 
   if (usableLabels > 0 && hasFullPath && pathTokens.length === parsedTune.beatSlices.length && parsedTune.melodyFingerprint) {
@@ -1107,6 +1190,7 @@ function getCandidateTokensForSlice(model, parsedTune, slice) {
   var measureSignatureKey = buildMeasureSignatureKey(slice, parsedTune);
 
   mergeCandidateBucket(output, model.counts.cadencePositions[buildCadenceKey(slice, parsedTune)], 8);
+  mergeCandidateBucket(output, model.counts.endingFinalOnsetTokens[buildEndingFinalOnsetKey(slice, parsedTune)], 8);
   mergeCandidateBucket(output, model.counts.onsetMeasureSignatureChordTotals[measureSignatureKey], 10);
   mergeCandidateBucket(output, model.counts.onsetSignatureChordTotals[signatureKey], 10);
   mergeCandidateBucket(output, model.counts.onsetPositionChordTotals[partPositionKey], 10);
@@ -1148,6 +1232,17 @@ function scoreSliceContext(model, token, parsedTune, slice) {
     (0.60 * logProbability(positionBucket, token, 0.8, styleBucket)) +
     (0.40 * logProbability(styleBucket, token, 0.8, globalBucket))
   );
+}
+
+function scoreEndingFinalOnset(model, token, parsedTune, slice) {
+  if (slice.isPickup || slice.measuresFromPartEnd !== 0) {
+    return 0;
+  }
+
+  var endingBucket = model.counts.endingFinalOnsetTokens[buildEndingFinalOnsetKey(slice, parsedTune)] || {};
+  var fallbackBucket = model.counts.cadencePositions[buildCadenceKey(slice, parsedTune)] || model.counts.styleChordTotals[buildStyleKey(parsedTune)] || {};
+
+  return 0.85 * logProbability(endingBucket, token, 0.7, fallbackBucket);
 }
 
 function scoreChangePreference(model, parsedTune, slice) {
@@ -1235,6 +1330,54 @@ function buildOnsetMeasurePatternHints(model, parsedTune) {
   });
 
   return hints;
+}
+
+function buildEndingPatternHints(model, parsedTune, bucketName) {
+  var output = {};
+  var processedBlocks = {};
+
+  parsedTune.beatSlices.forEach(function (slice) {
+    if (slice.isPickup || slice.beatInBar === null || slice.measuresFromPartEnd === null || slice.measuresFromPartEnd > 1) {
+      return;
+    }
+
+    var blockKey = slice.partIndex + "|" + slice.partPass;
+    if (processedBlocks[blockKey]) {
+      return;
+    }
+    processedBlocks[blockKey] = true;
+
+    var bucket = model.counts[bucketName][buildEndingPatternKey(slice, parsedTune)] || {};
+    var topPattern = selectTopKey(bucket);
+    if (!topPattern) {
+      return;
+    }
+
+    var hintMap = {};
+    topPattern.split("/").forEach(function (piece) {
+      var equalIndex = piece.indexOf("=");
+      if (equalIndex === -1) {
+        return;
+      }
+
+      hintMap[piece.slice(0, equalIndex)] = piece.slice(equalIndex + 1);
+    });
+
+    parsedTune.beatSlices.forEach(function (candidateSlice) {
+      if (candidateSlice.partIndex !== slice.partIndex || candidateSlice.partPass !== slice.partPass) {
+        return;
+      }
+
+      if (candidateSlice.isPickup || candidateSlice.beatInBar === null || candidateSlice.measuresFromPartEnd === null || candidateSlice.measuresFromPartEnd > 1) {
+        return;
+      }
+
+      var slotKey = buildPartSlotKey(candidateSlice.partIndex, candidateSlice.measureInPart, candidateSlice.beatInBar);
+      output[slotKey] = hintMap[buildEndingPatternSlotId(candidateSlice)] || null;
+    });
+  });
+
+  return output;
 }
 
 function buildExactMelodyPathHints(model, parsedTune) {
@@ -1420,6 +1563,8 @@ function predictChordPath(model, parsedTune) {
   var styleKey = buildStyleKey(parsedTune);
   var measurePatternHints = buildMeasurePatternHints(model, parsedTune);
   var onsetMeasurePatternHints = buildOnsetMeasurePatternHints(model, parsedTune);
+  var endingTokenHints = buildEndingPatternHints(model, parsedTune, "endingTokenPatterns");
+  var endingOnsetHints = buildEndingPatternHints(model, parsedTune, "endingOnsetPatterns");
   var exactMelodyPathHints = buildExactMelodyPathHints(model, parsedTune);
   var fuzzyPartHints = buildFuzzyPartHints(model, parsedTune);
   var fuzzyTuneHints = buildFuzzyTuneHints(model, parsedTune);
@@ -1437,6 +1582,8 @@ function predictChordPath(model, parsedTune) {
     var fuzzyHintToken = selectTopKey(fuzzyHintBucket);
     var fuzzyTuneOnsetBucket = fuzzyTuneHints.onsets[fuzzySlotKey] || {};
     var fuzzyTuneOnsetHint = selectTopKey(fuzzyTuneOnsetBucket);
+    var endingTokenHint = endingTokenHints[fuzzySlotKey] || null;
+    var endingOnsetHint = endingOnsetHints[fuzzySlotKey] || null;
     var previousFuzzyHintToken = null;
     var onsetMeasureHint = (onsetMeasurePatternHints[slice.rawBarIndex] || {})[String(slice.beatInBar)] || null;
     var previousExactHintToken = i > 0 ? (exactMelodyPathHints[i - 1] || null) : null;
@@ -1494,6 +1641,12 @@ function predictChordPath(model, parsedTune) {
       changePreference -= 0.44;
     }
 
+    if (endingOnsetHint === "change") {
+      changePreference += 0.46;
+    } else if (endingOnsetHint === "stay") {
+      changePreference -= 0.46;
+    }
+
     if (measureOnsetHint === "change") {
       changePreference += 0.24;
     } else if (measureOnsetHint === "stay") {
@@ -1514,6 +1667,10 @@ function predictChordPath(model, parsedTune) {
       candidates.unshift(fuzzyHintToken);
     }
 
+    if (endingTokenHint && candidates.indexOf(endingTokenHint) === -1) {
+      candidates.unshift(endingTokenHint);
+    }
+
     if (candidates.length === 0) {
       candidates = globalCandidates;
     }
@@ -1523,9 +1680,11 @@ function predictChordPath(model, parsedTune) {
       var token = candidates[j];
       var emissionScore = scoreEmission(model, token, slice, parsedTune.modeInfo, parsedTune, decoderProfile);
       var sliceContextScore = scoreSliceContext(model, token, parsedTune, slice);
+      var endingFinalOnsetScore = scoreEndingFinalOnset(model, token, parsedTune, slice);
       var measurePatternBonus = 0;
       var exactMelodyBonus = 0;
       var fuzzyPartBonus = 0;
+      var endingTokenBonus = 0;
       var hintedToken = measureHintToken;
 
       if (hintedToken && hintedToken === token) {
@@ -1540,10 +1699,14 @@ function predictChordPath(model, parsedTune) {
         fuzzyPartBonus = Math.min(2.0, decoderProfile.fuzzyHintWeight * (fuzzyHintBucket[token] || 0));
       }
 
+      if (endingTokenHint && endingTokenHint === token) {
+        endingTokenBonus = slice.measuresFromPartEnd === 0 ? 1.05 : 0.72;
+      }
+
       if (i === 0) {
         var startTransition = logProbability(getTransitionBucket(model, styleKey, "__START__"), token, 0.8, model.counts.chordTotals);
         currentLayer[token] = {
-          score: (decoderProfile.emissionWeight * emissionScore) + (decoderProfile.contextWeight * sliceContextScore) + (decoderProfile.startTransitionWeight * startTransition) + measurePatternBonus + exactMelodyBonus + fuzzyPartBonus,
+          score: (decoderProfile.emissionWeight * emissionScore) + (decoderProfile.contextWeight * sliceContextScore) + endingFinalOnsetScore + (decoderProfile.startTransitionWeight * startTransition) + measurePatternBonus + exactMelodyBonus + fuzzyPartBonus + endingTokenBonus,
           previous: null
         };
         continue;
@@ -1560,7 +1723,7 @@ function predictChordPath(model, parsedTune) {
         var transitionScore = logProbability(getTransitionBucket(model, styleKey, previousToken), token, 0.8, model.counts.chordTotals);
         var stayBonus = previousToken === token ? decoderProfile.stayBonus : 0;
         var changeBonus = previousToken === token ? (-1 * changePreference) : changePreference;
-        var candidateScore = previousLayer[previousToken].score + (decoderProfile.emissionWeight * emissionScore) + (decoderProfile.contextWeight * sliceContextScore) + (decoderProfile.transitionWeight * transitionScore) + stayBonus + changeBonus + measurePatternBonus + exactMelodyBonus + fuzzyPartBonus;
+        var candidateScore = previousLayer[previousToken].score + (decoderProfile.emissionWeight * emissionScore) + (decoderProfile.contextWeight * sliceContextScore) + endingFinalOnsetScore + (decoderProfile.transitionWeight * transitionScore) + stayBonus + changeBonus + measurePatternBonus + exactMelodyBonus + fuzzyPartBonus + endingTokenBonus;
 
         if (i === parsedTune.beatSlices.length - 1 && token.indexOf("1:") === 0) {
           candidateScore += decoderProfile.finalTonicBonus;
