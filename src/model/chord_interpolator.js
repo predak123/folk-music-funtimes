@@ -72,12 +72,40 @@ function createEmptyModel() {
       cadencePositions: {},
       cadenceOnsetPositions: {},
       cadenceOnsetChordTotals: {},
+      cadenceFunctionTotals: {},
+      cadenceFunctionTransitions: {},
       emissions: {},
       slotEmissions: {},
       emissionTotals: {},
       tuneTypes: {}
     }
   };
+}
+
+function ensureModelShape(model) {
+  var defaults = createEmptyModel();
+
+  if (!model.metadata) {
+    model.metadata = {};
+  }
+
+  Object.keys(defaults.metadata).forEach(function (key) {
+    if (model.metadata[key] === undefined) {
+      model.metadata[key] = defaults.metadata[key];
+    }
+  });
+
+  if (!model.counts) {
+    model.counts = {};
+  }
+
+  Object.keys(defaults.counts).forEach(function (key) {
+    if (model.counts[key] === undefined) {
+      model.counts[key] = Array.isArray(defaults.counts[key]) ? [] : {};
+    }
+  });
+
+  return model;
 }
 
 function buildMeasureSlot(slice) {
@@ -234,6 +262,16 @@ function buildCadenceOnsetKey(slice, parsedTune) {
   ].join("|");
 }
 
+function buildCadenceFunctionKey(slice, parsedTune) {
+  return [
+    parsedTune.modeInfo.modeFamily,
+    buildEndingRole(parsedTune, slice.partIndex),
+    slice.isPickupComplement ? "pickup-complement" : "regular",
+    slice.measuresFromPartEnd === null ? "na" : Math.min(slice.measuresFromPartEnd, 1),
+    slice.beatInBar
+  ].join("|");
+}
+
 function buildTypeModeIdentityKey(slice, parsedTune) {
   return [
     parsedTune.type || "unknown",
@@ -353,6 +391,17 @@ function buildEndingPatternKey(slice, parsedTune) {
     buildStyleKey(parsedTune),
     buildEndingRole(parsedTune, slice.partIndex),
     Math.min(slice.partLength || 0, 16)
+  ].join("|");
+}
+
+function buildCadenceFunctionTransitionKey(parsedTune, slice, previousFunction) {
+  return [
+    parsedTune.modeInfo.modeFamily,
+    buildEndingRole(parsedTune, slice.partIndex),
+    slice.isPickupComplement ? "pickup-complement" : "regular",
+    slice.measuresFromPartEnd === null ? "na" : Math.min(slice.measuresFromPartEnd, 1),
+    slice.beatInBar,
+    previousFunction || "__START__"
   ].join("|");
 }
 
@@ -932,6 +981,19 @@ function trainOnParsedTune(model, parsedTune, options) {
           normalized.token,
           sliceWeight
         );
+        incrementCount(
+          ensureNestedMap(model.counts.cadenceFunctionTotals, buildCadenceFunctionKey(slice, parsedTune)),
+          harmonicFunction,
+          sliceWeight
+        );
+        incrementCount(
+          ensureNestedMap(
+            model.counts.cadenceFunctionTransitions,
+            buildCadenceFunctionTransitionKey(parsedTune, slice, previousObservedFunction)
+          ),
+          harmonicFunction,
+          sliceWeight
+        );
       }
     }
 
@@ -1163,6 +1225,7 @@ function trainOnRow(model, row) {
     return false;
   }
 
+  ensureModelShape(model);
   trainOnParsedTune(model, item.parsedTune);
   return true;
 }
@@ -1187,6 +1250,8 @@ function trainOnRows(model, rows) {
   });
 
   var consensusPlans = buildConsensusPlans(items);
+
+  ensureModelShape(model);
 
   items.forEach(function (item, index) {
     trainOnParsedTune(model, item.parsedTune, consensusPlans[index]);
@@ -1294,6 +1359,8 @@ function buildDecoderProfile(parsedTune) {
     partPatternOnsetWeight: 0.34,
     partFamilyOnsetWeight: 0.42,
     cadenceOnsetWeight: 0.42,
+    cadenceFunctionWeight: 0.18,
+    cadenceFunctionTransitionWeight: 0.22,
     onsetPathWeight: 0.22,
     onsetPathTransitionWeight: 0.52,
     lockPredictedStays: false,
@@ -1377,6 +1444,8 @@ function buildDecoderProfile(parsedTune) {
       partPatternOnsetWeight: 0.46,
       partFamilyOnsetWeight: 0.55,
       cadenceOnsetWeight: 0.48,
+      cadenceFunctionWeight: 0.22,
+      cadenceFunctionTransitionWeight: 0.26,
       onsetPathWeight: 0.28,
       slotWeights: {
         onset: 1.30,
@@ -1392,6 +1461,8 @@ function buildDecoderProfile(parsedTune) {
       partPatternOnsetWeight: profile.partPatternOnsetWeight + 0.04,
       partFamilyOnsetWeight: profile.partFamilyOnsetWeight + 0.05,
       cadenceOnsetWeight: profile.cadenceOnsetWeight + 0.08,
+      cadenceFunctionWeight: profile.cadenceFunctionWeight + 0.10,
+      cadenceFunctionTransitionWeight: profile.cadenceFunctionTransitionWeight + 0.08,
       minorPenultimateWeight: 0.44,
       cadenceTonicRerankWeight: 0.56,
       cadenceTonicRerankMargin: 0.48
@@ -1399,11 +1470,13 @@ function buildDecoderProfile(parsedTune) {
   } else if (modeFamily === "mixolydian") {
     applyOverrides({
       finalTonicBonus: Math.min(profile.finalTonicBonus, 0.36),
-      cadenceOnsetWeight: profile.cadenceOnsetWeight + 0.04
+      cadenceOnsetWeight: profile.cadenceOnsetWeight + 0.04,
+      cadenceFunctionWeight: profile.cadenceFunctionWeight + 0.04
     });
   } else if (modeFamily === "major") {
     applyOverrides({
-      cadenceOnsetWeight: profile.cadenceOnsetWeight + 0.03
+      cadenceOnsetWeight: profile.cadenceOnsetWeight + 0.03,
+      cadenceFunctionWeight: profile.cadenceFunctionWeight + 0.03
     });
   }
 
@@ -1826,6 +1899,41 @@ function scoreHarmonicFunction(model, token, parsedTune, slice, predictedOnsetLa
   }
 
   return (decoderProfile.harmonicFunctionWeight * logProbability(functionBucket, functionName, 0.8, fallbackBucket)) + transitionScore;
+}
+
+function scoreCadenceResolution(model, token, parsedTune, slice, predictedOnsetLabel, previousToken, decoderProfile) {
+  var functionName;
+  var functionBucket;
+  var transitionBucket;
+  var fallbackBucket;
+  var previousFunction;
+  var score = 0;
+
+  if (predictedOnsetLabel !== "change" ||
+      !decoderProfile.cadenceFunctionWeight ||
+      slice.isPickup ||
+      slice.measuresFromPartEnd === null ||
+      slice.measuresFromPartEnd > 1) {
+    return 0;
+  }
+
+  functionName = harmonicFunctionForToken(token, parsedTune.modeInfo);
+  functionBucket = model.counts.cadenceFunctionTotals[buildCadenceFunctionKey(slice, parsedTune)] || {};
+  fallbackBucket = model.counts.typeModeFunctionTotals[buildTypeModeIdentityKey(slice, parsedTune)] ||
+    model.counts.modeFunctionTotals[parsedTune.modeInfo.modeFamily] || {};
+  score += decoderProfile.cadenceFunctionWeight * logProbability(functionBucket, functionName, 0.8, fallbackBucket);
+
+  if (!decoderProfile.cadenceFunctionTransitionWeight || !previousToken || previousToken === "__START__") {
+    return score;
+  }
+
+  previousFunction = harmonicFunctionForToken(previousToken, parsedTune.modeInfo);
+  transitionBucket = model.counts.cadenceFunctionTransitions[
+    buildCadenceFunctionTransitionKey(parsedTune, slice, previousFunction)
+  ] || {};
+  score += decoderProfile.cadenceFunctionTransitionWeight * logProbability(transitionBucket, functionName, 0.8, functionBucket);
+
+  return score;
 }
 
 function scoreMinorPenultimateRerank(token, parsedTune, slice, predictedOnsetLabel, decoderProfile) {
@@ -2722,6 +2830,7 @@ function predictChordPath(model, parsedTune) {
       var endingFinalOnsetScore = scoreEndingFinalOnset(model, token, parsedTune, slice);
       var typeModeIdentityScore = scoreTypeModeIdentity(model, token, parsedTune, slice, predictedOnsetLabel, decoderProfile);
       var harmonicFunctionScore = scoreHarmonicFunction(model, token, parsedTune, slice, predictedOnsetLabel, "__START__", decoderProfile);
+      var cadenceResolutionScore = scoreCadenceResolution(model, token, parsedTune, slice, predictedOnsetLabel, "__START__", decoderProfile);
       var minorPenultimateScore = scoreMinorPenultimateRerank(token, parsedTune, slice, predictedOnsetLabel, decoderProfile);
       var measurePatternBonus = 0;
       var exactMelodyBonus = 0;
@@ -2756,7 +2865,7 @@ function predictChordPath(model, parsedTune) {
       if (i === 0) {
         var startTransition = logProbability(getTransitionBucket(model, styleKey, "__START__"), token, 0.8, model.counts.chordTotals);
         currentLayer[token] = {
-          score: (decoderProfile.emissionWeight * emissionScore) + (decoderProfile.contextWeight * sliceContextScore) + endingFinalOnsetScore + typeModeIdentityScore + harmonicFunctionScore + minorPenultimateScore + (decoderProfile.startTransitionWeight * startTransition) + measurePatternBonus + exactMelodyBonus + canonicalMelodyBonus + fuzzyPartBonus + endingTokenBonus,
+          score: (decoderProfile.emissionWeight * emissionScore) + (decoderProfile.contextWeight * sliceContextScore) + endingFinalOnsetScore + typeModeIdentityScore + harmonicFunctionScore + cadenceResolutionScore + minorPenultimateScore + (decoderProfile.startTransitionWeight * startTransition) + measurePatternBonus + exactMelodyBonus + canonicalMelodyBonus + fuzzyPartBonus + endingTokenBonus,
           previous: null
         };
         continue;
@@ -2776,7 +2885,7 @@ function predictChordPath(model, parsedTune) {
         var transitionScore = logProbability(getTransitionBucket(model, styleKey, previousToken), token, 0.8, model.counts.chordTotals);
         var stayBonus = previousToken === token ? decoderProfile.stayBonus : 0;
         var changeBonus = previousToken === token ? (-1 * changePreference) : changePreference;
-        var candidateScore = previousLayer[previousToken].score + (decoderProfile.emissionWeight * emissionScore) + (decoderProfile.contextWeight * sliceContextScore) + endingFinalOnsetScore + typeModeIdentityScore + scoreHarmonicFunction(model, token, parsedTune, slice, predictedOnsetLabel, previousToken, decoderProfile) + minorPenultimateScore + (decoderProfile.transitionWeight * transitionScore) + stayBonus + changeBonus + measurePatternBonus + exactMelodyBonus + canonicalMelodyBonus + fuzzyPartBonus + endingTokenBonus;
+        var candidateScore = previousLayer[previousToken].score + (decoderProfile.emissionWeight * emissionScore) + (decoderProfile.contextWeight * sliceContextScore) + endingFinalOnsetScore + typeModeIdentityScore + scoreHarmonicFunction(model, token, parsedTune, slice, predictedOnsetLabel, previousToken, decoderProfile) + scoreCadenceResolution(model, token, parsedTune, slice, predictedOnsetLabel, previousToken, decoderProfile) + minorPenultimateScore + (decoderProfile.transitionWeight * transitionScore) + stayBonus + changeBonus + measurePatternBonus + exactMelodyBonus + canonicalMelodyBonus + fuzzyPartBonus + endingTokenBonus;
 
         if (i === parsedTune.beatSlices.length - 1 && token.indexOf("1:") === 0) {
           candidateScore += decoderProfile.finalTonicBonus;
@@ -2822,6 +2931,7 @@ function predictChordPath(model, parsedTune) {
 }
 
 function predictForTune(model, options) {
+  ensureModelShape(model);
   var parsedTune = abcParser.parseAbcTune(options);
   var path = predictChordPath(model, parsedTune);
 

@@ -65,6 +65,17 @@ function run() {
 
   assert.strictEqual(consensusPredictions[2].displayChord, "G");
 
+  var upgradedModel = modelApi.createEmptyModel();
+  delete upgradedModel.counts.cadenceFunctionTotals;
+  delete upgradedModel.counts.cadenceFunctionTransitions;
+  var upgradedPredictions = modelApi.predictForTune(upgradedModel, {
+    abc: "EA AB|G2 B2|EA AB|G2 dB|A2 A2|",
+    meter: "2/4",
+    mode: "Adorian",
+    type: "polka"
+  });
+  assert.ok(upgradedPredictions.length > 0);
+
   var structuralModel = modelApi.createEmptyModel();
   modelApi.trainOnRow(structuralModel, {
     abc: "\"G\"A2B2 c2d2|\"C\"e2f2 g2a2|\"D\"b2a2 g2f2|\"G\"e2d2 c2B2|\"G\"A4 B4|\"C\"c4 d4|\"D\"e4 f4|\"G\"g8|\"G\"A2B2 c2d2|\"C\"e2f2 g2a2|\"D\"b2a2 g2f2|\"G\"e2d2 c2B2|\"G\"A4 B4|\"C\"c4 d4|\"D\"e4 f4|\"G\"g8|",
@@ -89,6 +100,8 @@ function run() {
   assert.ok(Object.keys(structuralModel.counts.typeModeFunctionTotals).length > 0);
   assert.ok(Object.keys(structuralModel.counts.cadenceOnsetPositions).length > 0);
   assert.ok(Object.keys(structuralModel.counts.cadenceOnsetChordTotals).length > 0);
+  assert.ok(Object.keys(structuralModel.counts.cadenceFunctionTotals).length > 0);
+  assert.ok(Object.keys(structuralModel.counts.cadenceFunctionTransitions).length > 0);
   assert.ok(Object.keys(structuralModel.counts.rolePositions).length > 0);
   assert.ok(Object.keys(structuralModel.counts.phrasePositions).length > 0);
   assert.ok(Object.keys(structuralModel.counts.onsetRolePositions).length > 0);
