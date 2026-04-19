@@ -2,11 +2,13 @@ var path = require("path");
 var args = require("./lib/args");
 var csv = require("./lib/csv");
 var io = require("./lib/io");
+var fs = require("fs");
 var modelApi = require("./model/chord_interpolator");
 var abcParser = require("./music/abc");
 var theory = require("./music/theory");
 
 var DEFAULT_TUNES_URL = "https://raw.githubusercontent.com/adactio/TheSession-data/main/csv/tunes.csv";
+var DEFAULT_MODEL_PATH = path.join("artifacts", "the-session-model.json");
 
 function usage() {
   console.log("Usage:");
@@ -14,6 +16,7 @@ function usage() {
   console.log("  node src/cli.js train --csv data/tunes.csv --model artifacts/model.json [--limit 50000] [--types jig,reel]");
   console.log("  node src/cli.js evaluate --csv data/tunes.csv [--limit 20000] [--holdout-every 5] [--holdout-by row|tune|melody] [--types jig,reel]");
   console.log("  node src/cli.js predict --model artifacts/model.json --abc examples/input-no-chords.abc --meter 2/4 --mode Adorian --type polka [--write-abc output.abc]");
+  console.log("  node src/cli.js compare --csv data/tunes.csv --name \"Kesh, The\" [--setting-id 47264] [--model artifacts/the-session-model.json]");
 }
 
 function rowFromArray(headers, values) {
@@ -30,6 +33,51 @@ function rowFromArray(headers, values) {
 function normalizeTypeName(value) {
   var text = String(value || "unknown").trim().toLowerCase();
   return text || "unknown";
+}
+
+function normalizeNameQuery(value) {
+  var stopWords = {
+    a: true,
+    an: true,
+    the: true,
+    tune: true,
+    jig: true,
+    reel: true,
+    hornpipe: true,
+    polka: true,
+    waltz: true,
+    march: true,
+    strathspey: true,
+    slide: true,
+    mazurka: true,
+    barndance: true
+  };
+
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .split(/\s+/)
+    .filter(function (piece) {
+      return piece && !stopWords[piece];
+    })
+    .join(" ");
+}
+
+function rowNameMatches(rowName, query) {
+  var normalizedRowName = normalizeNameQuery(rowName);
+  var normalizedQuery = normalizeNameQuery(query);
+
+  if (!normalizedQuery) {
+    return false;
+  }
+
+  if (normalizedRowName === normalizedQuery) {
+    return true;
+  }
+
+  return normalizedQuery.split(/\s+/).every(function (piece) {
+    return normalizedRowName.indexOf(piece) !== -1;
+  });
 }
 
 function parseTypeFilter(text) {
@@ -131,6 +179,173 @@ function formatPredictions(predictions) {
       prediction.displayChord
     ].join(" | ");
   }).join("\n");
+}
+
+function chooseComparisonRow(rows, commandArgs) {
+  var settingId = commandArgs["setting-id"] ? String(commandArgs["setting-id"]) : "";
+  var typeFilter = commandArgs.type ? normalizeTypeName(commandArgs.type) : "";
+  var modeFilter = String(commandArgs.mode || "").trim().toLowerCase();
+  var filtered = rows.slice();
+
+  if (settingId) {
+    filtered = filtered.filter(function (row) {
+      return String(row.setting_id) === settingId;
+    });
+  }
+
+  if (typeFilter) {
+    filtered = filtered.filter(function (row) {
+      return normalizeTypeName(row.type) === typeFilter;
+    });
+  }
+
+  if (modeFilter) {
+    filtered = filtered.filter(function (row) {
+      return String(row.mode || "").trim().toLowerCase() === modeFilter;
+    });
+  }
+
+  if (!filtered.length) {
+    return null;
+  }
+
+  filtered.sort(function (left, right) {
+    var leftChorded = left.abc.indexOf("\"") !== -1 ? 1 : 0;
+    var rightChorded = right.abc.indexOf("\"") !== -1 ? 1 : 0;
+    var chordDiff = rightChorded - leftChorded;
+    if (chordDiff !== 0) {
+      return chordDiff;
+    }
+
+    return parseInt(left.setting_id || "0", 10) - parseInt(right.setting_id || "0", 10);
+  });
+
+  return filtered[0];
+}
+
+function formatChangePointComparison(parsedTruth, predictions) {
+  var lines = [
+    "bar | beat | truth | predicted | status"
+  ];
+  var previousTruthToken = null;
+  var previousPredToken = null;
+  var i;
+
+  for (i = 0; i < parsedTruth.beatSlices.length && i < predictions.length; i += 1) {
+    var slice = parsedTruth.beatSlices[i];
+    var truthChord = slice.chord ? theory.normalizeChord(slice.chord.raw, parsedTruth.modeInfo) : null;
+    var truthChanged;
+    var predChanged;
+    var status;
+
+    if (!truthChord) {
+      continue;
+    }
+
+    truthChanged = previousTruthToken === null || truthChord.token !== previousTruthToken;
+    predChanged = previousPredToken === null || predictions[i].token !== previousPredToken;
+
+    if (!truthChanged && !predChanged) {
+      previousTruthToken = truthChord.token;
+      previousPredToken = predictions[i].token;
+      continue;
+    }
+
+    status = predictions[i].token === truthChord.token ? "match" :
+      (String(predictions[i].token).split(":")[0] === String(truthChord.token).split(":")[0] ? "root-only" : "miss");
+
+    lines.push([
+      slice.isPickup ? "0" : String(slice.measureNumber),
+      slice.isPickup ? "pickup" : String((slice.beatInBar || 0) + 1),
+      theory.chordTokenToDisplayName(truthChord.token, parsedTruth.modeInfo),
+      predictions[i].displayChord,
+      status
+    ].join(" | "));
+
+    previousTruthToken = truthChord.token;
+    previousPredToken = predictions[i].token;
+  }
+
+  return lines.join("\n");
+}
+
+function runCompare(commandArgs) {
+  var csvPath = commandArgs.csv;
+  var queryName = commandArgs.name;
+  var rows = [];
+  var headers = null;
+  var selectedRow;
+  var modelPath = commandArgs.model || DEFAULT_MODEL_PATH;
+
+  if (!csvPath || !queryName) {
+    throw new Error("compare requires --csv and --name");
+  }
+
+  return csv.parseCsvFile(csvPath, function (rowValues) {
+    if (!headers) {
+      headers = rowValues;
+      return;
+    }
+
+    var row = rowFromArray(headers, rowValues);
+    if (!row.name || !row.abc) {
+      return;
+    }
+
+    if (!rowNameMatches(row.name, queryName)) {
+      return;
+    }
+
+    rows.push(row);
+  }).then(function () {
+    if (!rows.length) {
+      throw new Error("No tunes matched --name " + queryName);
+    }
+
+    selectedRow = chooseComparisonRow(rows, commandArgs);
+    if (!selectedRow) {
+      throw new Error("No matching setting remained after filters.");
+    }
+
+    if (!fs.existsSync(modelPath)) {
+      throw new Error("Model file not found: " + modelPath);
+    }
+
+    var model = io.readJson(modelPath);
+    var melodyAbc = abcParser.stripChordAnnotations(selectedRow.abc);
+    var parsedTruth = abcParser.parseAbcTune({
+      abc: selectedRow.abc,
+      meter: selectedRow.meter,
+      mode: selectedRow.mode,
+      type: selectedRow.type
+    });
+    var predictions = modelApi.predictForTune(model, {
+      abc: melodyAbc,
+      meter: selectedRow.meter,
+      mode: selectedRow.mode,
+      type: selectedRow.type
+    });
+    var predictedAbc = abcParser.injectPredictedChords(melodyAbc, predictions);
+
+    console.log("Comparison");
+    console.log("  name: " + selectedRow.name);
+    console.log("  tune_id: " + selectedRow.tune_id);
+    console.log("  setting_id: " + selectedRow.setting_id);
+    console.log("  type: " + selectedRow.type);
+    console.log("  meter: " + selectedRow.meter);
+    console.log("  mode: " + selectedRow.mode);
+    console.log("  matched settings: " + rows.length);
+    console.log("  model: " + modelPath);
+    console.log("");
+    console.log("Original Chorded ABC");
+    console.log(selectedRow.abc);
+    console.log("");
+    console.log("Predicted Chorded ABC");
+    console.log(predictedAbc);
+    console.log("");
+    console.log("Change-Point Comparison");
+    console.log(formatChangePointComparison(parsedTruth, predictions));
+  });
 }
 
 function runDownload(commandArgs) {
@@ -465,6 +680,8 @@ function main() {
     action = Promise.resolve().then(function () {
       runPredict(parsed);
     });
+  } else if (command === "compare") {
+    action = runCompare(parsed);
   } else {
     usage();
     process.exitCode = 1;
