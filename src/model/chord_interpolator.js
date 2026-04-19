@@ -65,6 +65,7 @@ function createEmptyModel() {
       fuzzyTuneLibrary: [],
       cadencePositions: {},
       cadenceOnsetPositions: {},
+      cadenceOnsetChordTotals: {},
       emissions: {},
       slotEmissions: {},
       emissionTotals: {},
@@ -811,6 +812,14 @@ function trainOnParsedTune(model, parsedTune, options) {
       if (!slice.isPickup && slice.measuresFromPartEnd === 0) {
         incrementCount(
           ensureNestedMap(model.counts.endingFinalOnsetTokens, buildEndingFinalOnsetKey(slice, parsedTune)),
+          normalized.token,
+          sliceWeight
+        );
+      }
+
+      if (!slice.isPickup && slice.measuresFromPartEnd !== null && slice.measuresFromPartEnd <= 1) {
+        incrementCount(
+          ensureNestedMap(model.counts.cadenceOnsetChordTotals, buildCadenceOnsetKey(slice, parsedTune)),
           normalized.token,
           sliceWeight
         );
@@ -1599,6 +1608,9 @@ function getCandidateTokensForSlice(model, parsedTune, slice) {
   var signatureKey = buildSignatureKey(slice, parsedTune);
   var measureSignatureKey = buildMeasureSignatureKey(slice, parsedTune);
 
+  if (slice.measuresFromPartEnd === 1) {
+    mergeCandidateBucket(output, model.counts.cadenceOnsetChordTotals[buildCadenceOnsetKey(slice, parsedTune)], 8);
+  }
   mergeCandidateBucket(output, model.counts.cadencePositions[buildCadenceKey(slice, parsedTune)], 8);
   mergeCandidateBucket(output, model.counts.endingFinalOnsetTokens[buildEndingFinalOnsetKey(slice, parsedTune)], 8);
   mergeCandidateBucket(output, model.counts.onsetMeasureSignatureChordTotals[measureSignatureKey], 10);
@@ -1718,12 +1730,14 @@ function scoreMinorPenultimateRerank(token, parsedTune, slice, predictedOnsetLab
   return 0;
 }
 
-function applyCadenceTonicRerank(currentLayer, slice, parsedTune, predictedOnsetLabel, decoderProfile) {
+function applyCadenceTonicRerank(model, currentLayer, slice, parsedTune, predictedOnsetLabel, decoderProfile) {
   var tonicToken;
   var orderedTokens;
   var bestToken;
   var bestNonTonicToken = null;
   var bestNonTonicScore = -Infinity;
+  var cadenceOnsetBucket;
+  var cadenceOrdered;
   var i;
 
   if (!decoderProfile.cadenceTonicRerankWeight ||
@@ -1759,6 +1773,23 @@ function applyCadenceTonicRerank(currentLayer, slice, parsedTune, predictedOnset
 
   if (!bestNonTonicToken) {
     return;
+  }
+
+  if (slice.measuresFromPartEnd === 1) {
+    cadenceOnsetBucket = model.counts.cadenceOnsetChordTotals[buildCadenceOnsetKey(slice, parsedTune)] || {};
+    cadenceOrdered = Object.keys(cadenceOnsetBucket).sort(function (left, right) {
+      return cadenceOnsetBucket[right] - cadenceOnsetBucket[left];
+    });
+
+    for (i = 0; i < cadenceOrdered.length; i += 1) {
+      if (cadenceOrdered[i] === tonicToken || !currentLayer[cadenceOrdered[i]]) {
+        continue;
+      }
+
+      bestNonTonicToken = cadenceOrdered[i];
+      bestNonTonicScore = currentLayer[bestNonTonicToken].score;
+      break;
+    }
   }
 
   if ((currentLayer[tonicToken].score - bestNonTonicScore) <= decoderProfile.cadenceTonicRerankMargin) {
@@ -2638,7 +2669,7 @@ function predictChordPath(model, parsedTune) {
       };
     }
 
-    applyCadenceTonicRerank(currentLayer, slice, parsedTune, predictedOnsetLabel, decoderProfile);
+    applyCadenceTonicRerank(model, currentLayer, slice, parsedTune, predictedOnsetLabel, decoderProfile);
 
     layers.push(currentLayer);
   }
