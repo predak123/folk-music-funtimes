@@ -48,6 +48,8 @@ function createEmptyModel() {
       onsetSignatureChordTotals: {},
       onsetMeasureSignatureChordTotals: {},
       exactMelodyPaths: {},
+      canonicalMelodyTokens: {},
+      canonicalMelodyOnsets: {},
       fuzzyPartLibrary: [],
       fuzzyTuneLibrary: [],
       cadencePositions: {},
@@ -250,6 +252,10 @@ function buildPartSlotKey(partIndex, measureInPart, beatInBar) {
   ].join("|");
 }
 
+function getPartFingerprints(parsedTune) {
+  return parsedTune.partFingerprints || [];
+}
+
 function scorePartFingerprintSimilarity(targetMeasures, candidateMeasures) {
   var left = targetMeasures || [];
   var right = candidateMeasures || [];
@@ -292,6 +298,10 @@ function scorePartFingerprintSimilarity(targetMeasures, candidateMeasures) {
 }
 
 function buildTuneMeasureSignatures(parsedTune) {
+  if (parsedTune.canonicalTuneMeasureSignatures && parsedTune.canonicalTuneMeasureSignatures.length) {
+    return parsedTune.canonicalTuneMeasureSignatures.slice();
+  }
+
   return (parsedTune.measures || []).filter(function (measure) {
     return !measure.isPickup;
   }).map(function (measure) {
@@ -300,6 +310,8 @@ function buildTuneMeasureSignatures(parsedTune) {
 }
 
 function buildTuneSlotMaps(parsedTune) {
+  var tokenBuckets = {};
+  var onsetBuckets = {};
   var tokens = {};
   var onsets = {};
   var previousToken = null;
@@ -312,9 +324,17 @@ function buildTuneSlotMaps(parsedTune) {
 
     var slotKey = buildPartSlotKey(slice.partIndex, slice.measureInPart, slice.beatInBar);
     var onsetKey = previousToken === null || previousToken !== normalized.token ? "change" : "stay";
-    tokens[slotKey] = normalized.token;
-    onsets[slotKey] = onsetKey;
+    incrementCount(ensureNestedMap(tokenBuckets, slotKey), normalized.token, 1);
+    incrementCount(ensureNestedMap(onsetBuckets, slotKey), onsetKey, 1);
     previousToken = normalized.token;
+  });
+
+  Object.keys(tokenBuckets).forEach(function (slotKey) {
+    tokens[slotKey] = selectTopKey(tokenBuckets[slotKey]);
+  });
+
+  Object.keys(onsetBuckets).forEach(function (slotKey) {
+    onsets[slotKey] = selectTopKey(onsetBuckets[slotKey]);
   });
 
   return {
@@ -612,11 +632,15 @@ function trainOnParsedTune(model, parsedTune, options) {
       if (!partLibraryEntries[slice.partIndex]) {
         partLibraryEntries[slice.partIndex] = {
           partIndex: slice.partIndex,
-          slots: {}
+          slotBuckets: {}
         };
       }
 
-      partLibraryEntries[slice.partIndex].slots[buildPartSlotKey(slice.partIndex, slice.measureInPart, slice.beatInBar)] = normalized.token;
+      incrementCount(
+        ensureNestedMap(partLibraryEntries[slice.partIndex].slotBuckets, buildPartSlotKey(slice.partIndex, slice.measureInPart, slice.beatInBar)),
+        normalized.token,
+        sliceWeight
+      );
     }
 
     var emissionBucket = ensureNestedMap(model.counts.emissions, normalized.token);
@@ -670,12 +694,17 @@ function trainOnParsedTune(model, parsedTune, options) {
     incrementCount(ensureNestedMap(model.counts.exactMelodyPaths, parsedTune.melodyFingerprint), pathTokens.join("/"), tuneWeight);
   }
 
-  if (usableLabels > 0 && parsedTune.partFingerprints && parsedTune.partFingerprints.length) {
-    parsedTune.partFingerprints.forEach(function (partFingerprint) {
+  if (usableLabels > 0 && getPartFingerprints(parsedTune).length) {
+    getPartFingerprints(parsedTune).forEach(function (partFingerprint) {
       var entry = partLibraryEntries[partFingerprint.partIndex];
       if (!entry) {
         return;
       }
+
+      var slots = {};
+      Object.keys(entry.slotBuckets || {}).forEach(function (slotKey) {
+        slots[slotKey] = selectTopKey(entry.slotBuckets[slotKey]);
+      });
 
       model.counts.fuzzyPartLibrary.push({
         styleKey: styleKey,
@@ -683,7 +712,7 @@ function trainOnParsedTune(model, parsedTune, options) {
         modeFamily: parsedTune.modeInfo.modeFamily,
         partIndex: partFingerprint.partIndex,
         measureSignatures: partFingerprint.measureSignatures || [],
-        slots: entry.slots,
+        slots: slots,
         weight: tuneWeight
       });
     });
@@ -691,12 +720,36 @@ function trainOnParsedTune(model, parsedTune, options) {
 
   if (usableLabels > 0) {
     var tuneSlotMaps = buildTuneSlotMaps(parsedTune);
+    if (parsedTune.canonicalMelodyFingerprint) {
+      Object.keys(tuneSlotMaps.tokens).forEach(function (slotKey) {
+        incrementCount(
+          ensureNestedMap(
+            ensureNestedMap(model.counts.canonicalMelodyTokens, parsedTune.canonicalMelodyFingerprint),
+            slotKey
+          ),
+          tuneSlotMaps.tokens[slotKey],
+          tuneWeight
+        );
+      });
+
+      Object.keys(tuneSlotMaps.onsets).forEach(function (slotKey) {
+        incrementCount(
+          ensureNestedMap(
+            ensureNestedMap(model.counts.canonicalMelodyOnsets, parsedTune.canonicalMelodyFingerprint),
+            slotKey
+          ),
+          tuneSlotMaps.onsets[slotKey],
+          tuneWeight
+        );
+      });
+    }
+
     model.counts.fuzzyTuneLibrary.push({
       styleKey: styleKey,
       typeMeterKey: typeMeterKey,
       modeFamily: parsedTune.modeInfo.modeFamily,
       measureSignatures: buildTuneMeasureSignatures(parsedTune),
-      partCount: parsedTune.partFingerprints ? parsedTune.partFingerprints.length : 0,
+      partCount: getPartFingerprints(parsedTune).length,
       slots: tuneSlotMaps.tokens,
       onsets: tuneSlotMaps.onsets,
       weight: tuneWeight
@@ -1394,16 +1447,23 @@ function buildExactMelodyPathHints(model, parsedTune) {
   }, {});
 }
 
+function buildCanonicalMelodyHints(model, parsedTune) {
+  return {
+    tokens: model.counts.canonicalMelodyTokens[parsedTune.canonicalMelodyFingerprint] || {},
+    onsets: model.counts.canonicalMelodyOnsets[parsedTune.canonicalMelodyFingerprint] || {}
+  };
+}
+
 function buildFuzzyPartHints(model, parsedTune) {
   var output = {};
   var entries = model.counts.fuzzyPartLibrary || [];
   var topMatches = [];
 
-  if (!parsedTune.partFingerprints || !parsedTune.partFingerprints.length || !entries.length) {
+  if (!getPartFingerprints(parsedTune).length || !entries.length) {
     return output;
   }
 
-  parsedTune.partFingerprints.forEach(function (targetPart) {
+  getPartFingerprints(parsedTune).forEach(function (targetPart) {
     entries.forEach(function (entry) {
       if (entry.typeMeterKey !== buildTypeMeterKey(parsedTune)) {
         return;
@@ -1483,7 +1543,7 @@ function buildFuzzyTuneHints(model, parsedTune) {
       similarity += 0.9;
     }
 
-    if ((entry.partCount || 0) === ((parsedTune.partFingerprints || []).length || 0)) {
+    if ((entry.partCount || 0) === (getPartFingerprints(parsedTune).length || 0)) {
       similarity += 0.45;
     }
 
@@ -1566,6 +1626,7 @@ function predictChordPath(model, parsedTune) {
   var endingTokenHints = buildEndingPatternHints(model, parsedTune, "endingTokenPatterns");
   var endingOnsetHints = buildEndingPatternHints(model, parsedTune, "endingOnsetPatterns");
   var exactMelodyPathHints = buildExactMelodyPathHints(model, parsedTune);
+  var canonicalMelodyHints = buildCanonicalMelodyHints(model, parsedTune);
   var fuzzyPartHints = buildFuzzyPartHints(model, parsedTune);
   var fuzzyTuneHints = buildFuzzyTuneHints(model, parsedTune);
   var i;
@@ -1578,6 +1639,12 @@ function predictChordPath(model, parsedTune) {
     var previousMeasureHintToken = null;
     var exactHintToken = exactMelodyPathHints[i] || null;
     var fuzzySlotKey = buildPartSlotKey(slice.partIndex, slice.measureInPart, slice.beatInBar);
+    var canonicalHintBucket = canonicalMelodyHints.tokens[fuzzySlotKey] || {};
+    var canonicalHintLeader = describeBucketLeader(canonicalHintBucket);
+    var canonicalHintToken = canonicalHintLeader ? canonicalHintLeader.token : null;
+    var canonicalOnsetBucket = canonicalMelodyHints.onsets[fuzzySlotKey] || {};
+    var canonicalOnsetLeader = describeBucketLeader(canonicalOnsetBucket);
+    var canonicalOnsetHint = canonicalOnsetLeader ? canonicalOnsetLeader.token : null;
     var fuzzyHintBucket = fuzzyPartHints[fuzzySlotKey] || {};
     var fuzzyHintToken = selectTopKey(fuzzyHintBucket);
     var fuzzyTuneOnsetBucket = fuzzyTuneHints.onsets[fuzzySlotKey] || {};
@@ -1635,6 +1702,12 @@ function predictChordPath(model, parsedTune) {
       changePreference -= 0.38;
     }
 
+    if (canonicalOnsetHint === "change") {
+      changePreference += 0.78 * (canonicalOnsetLeader ? canonicalOnsetLeader.confidence : 1);
+    } else if (canonicalOnsetHint === "stay") {
+      changePreference -= 0.78 * (canonicalOnsetLeader ? canonicalOnsetLeader.confidence : 1);
+    }
+
     if (fuzzyTuneOnsetHint === "change") {
       changePreference += 0.44;
     } else if (fuzzyTuneOnsetHint === "stay") {
@@ -1663,6 +1736,10 @@ function predictChordPath(model, parsedTune) {
       candidates.unshift(exactHintToken);
     }
 
+    if (canonicalHintToken && candidates.indexOf(canonicalHintToken) === -1) {
+      candidates.unshift(canonicalHintToken);
+    }
+
     if (fuzzyHintToken && candidates.indexOf(fuzzyHintToken) === -1) {
       candidates.unshift(fuzzyHintToken);
     }
@@ -1683,6 +1760,7 @@ function predictChordPath(model, parsedTune) {
       var endingFinalOnsetScore = scoreEndingFinalOnset(model, token, parsedTune, slice);
       var measurePatternBonus = 0;
       var exactMelodyBonus = 0;
+      var canonicalMelodyBonus = 0;
       var fuzzyPartBonus = 0;
       var endingTokenBonus = 0;
       var hintedToken = measureHintToken;
@@ -1693,6 +1771,13 @@ function predictChordPath(model, parsedTune) {
 
       if (exactHintToken && exactHintToken === token) {
         exactMelodyBonus = decoderProfile.exactHintBonus;
+      }
+
+      if (canonicalHintToken && canonicalHintToken === token) {
+        canonicalMelodyBonus = Math.min(
+          1.85,
+          (0.70 + (0.95 * (canonicalHintLeader ? canonicalHintLeader.confidence : 1)))
+        );
       }
 
       if (fuzzyHintToken && fuzzyHintToken === token) {
@@ -1706,7 +1791,7 @@ function predictChordPath(model, parsedTune) {
       if (i === 0) {
         var startTransition = logProbability(getTransitionBucket(model, styleKey, "__START__"), token, 0.8, model.counts.chordTotals);
         currentLayer[token] = {
-          score: (decoderProfile.emissionWeight * emissionScore) + (decoderProfile.contextWeight * sliceContextScore) + endingFinalOnsetScore + (decoderProfile.startTransitionWeight * startTransition) + measurePatternBonus + exactMelodyBonus + fuzzyPartBonus + endingTokenBonus,
+          score: (decoderProfile.emissionWeight * emissionScore) + (decoderProfile.contextWeight * sliceContextScore) + endingFinalOnsetScore + (decoderProfile.startTransitionWeight * startTransition) + measurePatternBonus + exactMelodyBonus + canonicalMelodyBonus + fuzzyPartBonus + endingTokenBonus,
           previous: null
         };
         continue;
@@ -1723,7 +1808,7 @@ function predictChordPath(model, parsedTune) {
         var transitionScore = logProbability(getTransitionBucket(model, styleKey, previousToken), token, 0.8, model.counts.chordTotals);
         var stayBonus = previousToken === token ? decoderProfile.stayBonus : 0;
         var changeBonus = previousToken === token ? (-1 * changePreference) : changePreference;
-        var candidateScore = previousLayer[previousToken].score + (decoderProfile.emissionWeight * emissionScore) + (decoderProfile.contextWeight * sliceContextScore) + endingFinalOnsetScore + (decoderProfile.transitionWeight * transitionScore) + stayBonus + changeBonus + measurePatternBonus + exactMelodyBonus + fuzzyPartBonus + endingTokenBonus;
+        var candidateScore = previousLayer[previousToken].score + (decoderProfile.emissionWeight * emissionScore) + (decoderProfile.contextWeight * sliceContextScore) + endingFinalOnsetScore + (decoderProfile.transitionWeight * transitionScore) + stayBonus + changeBonus + measurePatternBonus + exactMelodyBonus + canonicalMelodyBonus + fuzzyPartBonus + endingTokenBonus;
 
         if (i === parsedTune.beatSlices.length - 1 && token.indexOf("1:") === 0) {
           candidateScore += decoderProfile.finalTonicBonus;

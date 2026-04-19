@@ -1,4 +1,5 @@
 var assert = require("assert");
+var abc = require("../src/music/abc");
 var modelApi = require("../src/model/chord_interpolator");
 
 function run() {
@@ -63,6 +64,27 @@ function run() {
   });
 
   assert.strictEqual(consensusPredictions[2].displayChord, "G");
+
+  var structuralModel = modelApi.createEmptyModel();
+  modelApi.trainOnRow(structuralModel, {
+    abc: "\"G\"A2B2 c2d2|\"C\"e2f2 g2a2|\"D\"b2a2 g2f2|\"G\"e2d2 c2B2|\"G\"A4 B4|\"C\"c4 d4|\"D\"e4 f4|\"G\"g8|\"G\"A2B2 c2d2|\"C\"e2f2 g2a2|\"D\"b2a2 g2f2|\"G\"e2d2 c2B2|\"G\"A4 B4|\"C\"c4 d4|\"D\"e4 f4|\"G\"g8|",
+    meter: "4/4",
+    mode: "Gmajor",
+    type: "reel"
+  });
+
+  var canonicalParsed = abc.parseAbcTune({
+    abc: "A2B2 c2d2|e2f2 g2a2|b2a2 g2f2|e2d2 c2B2|A4 B4|c4 d4|e4 f4|g8|",
+    meter: "4/4",
+    mode: "Gmajor",
+    type: "reel"
+  });
+
+  assert.ok(structuralModel.counts.canonicalMelodyTokens[canonicalParsed.canonicalMelodyFingerprint]);
+  assert.strictEqual(
+    structuralModel.counts.canonicalMelodyTokens[canonicalParsed.canonicalMelodyFingerprint]["0|0|0"]["1:maj"],
+    1
+  );
 }
 
 module.exports = {

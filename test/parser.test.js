@@ -61,12 +61,28 @@ function run() {
     type: "jig"
   });
 
+  var repeatedOnce = abc.parseAbcTune({
+    abc: "A2B2 c2d2|e2f2 g2a2|b2a2 g2f2|e2d2 c2B2|A4 B4|c4 d4|e4 f4|g8|",
+    meter: "4/4",
+    mode: "Gmajor",
+    type: "reel"
+  });
+
+  var writtenTwice = abc.parseAbcTune({
+    abc: "A2B2 c2d2|e2f2 g2a2|b2a2 g2f2|e2d2 c2B2|A4 B4|c4 d4|e4 f4|g8|A2B2 c2d2|e2f2 g2a2|b2a2 g2f2|e2d2 c2B2|A4 B4|c4 d4|e4 f4|g8|",
+    meter: "4/4",
+    mode: "Gmajor",
+    type: "reel"
+  });
+
   assert.strictEqual(withChords.beatSlices[0].slotProfiles.length, 2);
   assert.ok(withChords.beatSlices[0].slotProfiles[0].noteWeights);
   assert.ok(jig.beatSlices[0].subPulsePcs.onset.length > 0);
   assert.ok(jig.beatSlices[0].subPulsePcs.third.length > 0);
   assert.strictEqual(jig.beatSlices[0].slotProfiles.length, 3);
   assert.strictEqual(jig.beatSlices[0].slotProfiles[2].label, "late");
+  assert.strictEqual(repeatedOnce.canonicalMelodyFingerprint, writtenTwice.canonicalMelodyFingerprint);
+  assert.strictEqual(writtenTwice.canonicalTuneMeasureSignatures.length, 8);
 }
 
 module.exports = {

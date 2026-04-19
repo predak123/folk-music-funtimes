@@ -716,8 +716,27 @@ function buildMelodyFingerprint(parsedTune) {
   }).join("||");
 }
 
+function selectPreferredSignature(signatureCounts, firstSeenOrder) {
+  var bestSignature = null;
+  var bestCount = -Infinity;
+
+  Object.keys(signatureCounts || {}).forEach(function (signature) {
+    var count = signatureCounts[signature];
+    var order = firstSeenOrder[signature];
+    var bestOrder = bestSignature === null ? Infinity : firstSeenOrder[bestSignature];
+
+    if (count > bestCount || (count === bestCount && order < bestOrder)) {
+      bestCount = count;
+      bestSignature = signature;
+    }
+  });
+
+  return bestSignature || "";
+}
+
 function buildPartFingerprints(parsedTune) {
   var grouped = {};
+  var orderCounter = 0;
 
   parsedTune.measures.forEach(function (measure) {
     if (measure.isPickup) {
@@ -729,7 +748,18 @@ function buildPartFingerprints(parsedTune) {
     }
 
     if (!grouped[measure.partIndex][measure.measureInPart]) {
-      grouped[measure.partIndex][measure.measureInPart] = measure.signature;
+      grouped[measure.partIndex][measure.measureInPart] = {
+        counts: {},
+        firstSeen: {}
+      };
+    }
+
+    grouped[measure.partIndex][measure.measureInPart].counts[measure.signature] =
+      (grouped[measure.partIndex][measure.measureInPart].counts[measure.signature] || 0) + 1;
+
+    if (grouped[measure.partIndex][measure.measureInPart].firstSeen[measure.signature] === undefined) {
+      grouped[measure.partIndex][measure.measureInPart].firstSeen[measure.signature] = orderCounter;
+      orderCounter += 1;
     }
   });
 
@@ -740,18 +770,32 @@ function buildPartFingerprints(parsedTune) {
     var orderedKeys = Object.keys(measures).sort(function (left, right) {
       return parseInt(left, 10) - parseInt(right, 10);
     });
-    var ordered = orderedKeys.map(function (measureIndex) {
-      return "M" + measureIndex + "=" + measures[measureIndex];
+    var orderedSignatures = orderedKeys.map(function (measureIndex) {
+      return selectPreferredSignature(measures[measureIndex].counts, measures[measureIndex].firstSeen);
+    });
+    var ordered = orderedKeys.map(function (measureIndex, index) {
+      return "M" + measureIndex + "=" + orderedSignatures[index];
     }).join("||");
 
     return {
       partIndex: parseInt(partIndex, 10),
-      measureSignatures: orderedKeys.map(function (measureIndex) {
-        return measures[measureIndex];
-      }),
+      measureSignatures: orderedSignatures,
       fingerprint: ordered
     };
   });
+}
+
+function buildCanonicalTuneMeasureSignatures(parsedTune) {
+  return (parsedTune.partFingerprints || []).reduce(function (acc, partFingerprint) {
+    Array.prototype.push.apply(acc, partFingerprint.measureSignatures || []);
+    return acc;
+  }, []);
+}
+
+function buildCanonicalMelodyFingerprint(parsedTune) {
+  return (parsedTune.partFingerprints || []).map(function (partFingerprint) {
+    return "P" + partFingerprint.partIndex + "=" + partFingerprint.fingerprint;
+  }).join("##");
 }
 
 function parseAbcTune(options) {
@@ -976,6 +1020,8 @@ function parseAbcTune(options) {
   parsed.beatSlices = buildBeatSlices(parsed);
   parsed.melodyFingerprint = buildMelodyFingerprint(parsed);
   parsed.partFingerprints = buildPartFingerprints(parsed);
+  parsed.canonicalTuneMeasureSignatures = buildCanonicalTuneMeasureSignatures(parsed);
+  parsed.canonicalMelodyFingerprint = buildCanonicalMelodyFingerprint(parsed);
 
   return parsed;
 }
@@ -1016,6 +1062,7 @@ function injectPredictedChords(abcText, predictions) {
 }
 
 module.exports = {
+  buildCanonicalMelodyFingerprint: buildCanonicalMelodyFingerprint,
   buildMelodyFingerprint: buildMelodyFingerprint,
   injectPredictedChords: injectPredictedChords,
   parseAbcTune: parseAbcTune,
