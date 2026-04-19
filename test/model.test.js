@@ -87,6 +87,7 @@ function run() {
   );
   assert.ok(Object.keys(structuralModel.counts.typeModeOnsetChordTotals).length > 0);
   assert.ok(Object.keys(structuralModel.counts.typeModeFunctionTotals).length > 0);
+  assert.ok(Object.keys(structuralModel.counts.cadenceOnsetPositions).length > 0);
   assert.ok(Object.keys(structuralModel.counts.partOnsetPatterns).length > 0);
   assert.ok(structuralModel.counts.fuzzyPartFamilyLibrary.length > 0);
 }

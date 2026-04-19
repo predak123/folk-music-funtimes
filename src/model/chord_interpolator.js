@@ -64,6 +64,7 @@ function createEmptyModel() {
       fuzzyPartFamilyLibrary: [],
       fuzzyTuneLibrary: [],
       cadencePositions: {},
+      cadenceOnsetPositions: {},
       emissions: {},
       slotEmissions: {},
       emissionTotals: {},
@@ -200,6 +201,16 @@ function buildCadenceKey(slice, parsedTune) {
   return [
     buildStyleKey(parsedTune),
     "part" + slice.partIndex,
+    slice.measuresFromPartEnd === null ? "na" : Math.min(slice.measuresFromPartEnd, 2),
+    slice.beatInBar
+  ].join("|");
+}
+
+function buildCadenceOnsetKey(slice, parsedTune) {
+  return [
+    buildStyleKey(parsedTune),
+    buildEndingRole(parsedTune, slice.partIndex),
+    slice.isPickupComplement ? "pickup-complement" : "regular",
     slice.measuresFromPartEnd === null ? "na" : Math.min(slice.measuresFromPartEnd, 2),
     slice.beatInBar
   ].join("|");
@@ -808,6 +819,7 @@ function trainOnParsedTune(model, parsedTune, options) {
 
     if (!slice.isPickup && slice.measuresFromPartEnd !== null && slice.measuresFromPartEnd <= 2) {
       incrementCount(ensureNestedMap(model.counts.cadencePositions, buildCadenceKey(slice, parsedTune)), normalized.token, sliceWeight);
+      incrementCount(ensureNestedMap(model.counts.cadenceOnsetPositions, buildCadenceOnsetKey(slice, parsedTune)), onsetKey, sliceWeight);
     }
 
     if (!slice.isPickup && slice.beatInBar !== null) {
@@ -1139,8 +1151,17 @@ function copyMap(map) {
   }, {});
 }
 
+function selectModeAwareMatches(matches, requireExactMode, limit) {
+  var exactModeMatches = (matches || []).filter(function (match) {
+    return match.modeMatch;
+  });
+  var selected = requireExactMode && exactModeMatches.length ? exactModeMatches : (matches || []);
+  return selected.slice(0, limit || selected.length);
+}
+
 function buildDecoderProfile(parsedTune) {
   var typeName = String(parsedTune.type || "unknown").toLowerCase();
+  var modeFamily = parsedTune.modeInfo.modeFamily;
   var profile = {
     emissionWeight: 0.85,
     contextWeight: 1.0,
@@ -1154,8 +1175,10 @@ function buildDecoderProfile(parsedTune) {
     partFamilyHintWeight: 0.11,
     partPatternOnsetWeight: 0.34,
     partFamilyOnsetWeight: 0.42,
+    cadenceOnsetWeight: 0.42,
     onsetPathWeight: 0.22,
     onsetPathTransitionWeight: 0.52,
+    lockPredictedStays: false,
     typeModeIdentityWeight: 0,
     harmonicFunctionWeight: 0,
     harmonicTransitionWeight: 0,
@@ -1235,12 +1258,34 @@ function buildDecoderProfile(parsedTune) {
       partPatternBonus: 0.92,
       partPatternOnsetWeight: 0.46,
       partFamilyOnsetWeight: 0.55,
+      cadenceOnsetWeight: 0.48,
       onsetPathWeight: 0.28,
       slotWeights: {
         onset: 1.30,
         middle: 0.42,
         late: 0.86
       }
+    });
+  }
+
+  if (["minor", "dorian"].indexOf(modeFamily) !== -1) {
+    applyOverrides({
+      finalTonicBonus: 0.26,
+      partPatternOnsetWeight: profile.partPatternOnsetWeight + 0.04,
+      partFamilyOnsetWeight: profile.partFamilyOnsetWeight + 0.05,
+      cadenceOnsetWeight: profile.cadenceOnsetWeight + 0.08,
+      minorPenultimateWeight: 0.44,
+      cadenceTonicRerankWeight: 0.56,
+      cadenceTonicRerankMargin: 0.48
+    });
+  } else if (modeFamily === "mixolydian") {
+    applyOverrides({
+      finalTonicBonus: Math.min(profile.finalTonicBonus, 0.36),
+      cadenceOnsetWeight: profile.cadenceOnsetWeight + 0.04
+    });
+  } else if (modeFamily === "major") {
+    applyOverrides({
+      cadenceOnsetWeight: profile.cadenceOnsetWeight + 0.03
     });
   }
 
@@ -1605,7 +1650,8 @@ function scoreEndingFinalOnset(model, token, parsedTune, slice) {
   }
 
   var endingBucket = model.counts.endingFinalOnsetTokens[buildEndingFinalOnsetKey(slice, parsedTune)] || {};
-  var fallbackBucket = model.counts.cadencePositions[buildCadenceKey(slice, parsedTune)] || model.counts.styleChordTotals[buildStyleKey(parsedTune)] || {};
+  var fallbackBucket = model.counts.cadencePositions[buildCadenceKey(slice, parsedTune)] ||
+    model.counts.styleChordTotals[buildStyleKey(parsedTune)] || {};
   return 0.85 * logProbability(endingBucket, token, 0.7, fallbackBucket);
 }
 
@@ -1939,6 +1985,7 @@ function buildFuzzyPartHints(model, parsedTune) {
       topMatches.push({
         partIndex: targetPart.partIndex,
         similarity: similarity,
+        modeMatch: entry.modeFamily === parsedTune.modeInfo.modeFamily,
         slots: entry.slots,
         weight: entry.weight || 1
       });
@@ -1949,7 +1996,7 @@ function buildFuzzyPartHints(model, parsedTune) {
     return right.similarity - left.similarity;
   });
 
-  topMatches.slice(0, 8).forEach(function (match) {
+  selectModeAwareMatches(topMatches, true, 8).forEach(function (match) {
     Object.keys(match.slots || {}).forEach(function (slotKey) {
       var parts = slotKey.split("|");
       var targetSlotKey = buildPartSlotKey(match.partIndex, parseInt(parts[0], 10), parseInt(parts[1], 10));
@@ -2009,6 +2056,7 @@ function buildFuzzyPartFamilyHints(model, parsedTune) {
       rankedMatches.push({
         partIndex: targetPart.partIndex,
         similarity: similarity,
+        modeMatch: entry.modeFamily === parsedTune.modeInfo.modeFamily,
         slots: entry.slots || {},
         onsets: entry.onsets || {},
         weight: entry.weight || 1
@@ -2020,7 +2068,7 @@ function buildFuzzyPartFamilyHints(model, parsedTune) {
     return right.similarity - left.similarity;
   });
 
-  rankedMatches.slice(0, 10).forEach(function (match) {
+  selectModeAwareMatches(rankedMatches, true, 10).forEach(function (match) {
     Object.keys(match.slots).forEach(function (slotKey) {
       var parts = slotKey.split("|");
       var targetSlotKey = buildPartSlotKey(match.partIndex, parseInt(parts[0], 10), parseInt(parts[1], 10));
@@ -2031,7 +2079,9 @@ function buildFuzzyPartFamilyHints(model, parsedTune) {
 
       incrementCount(output.tokens[targetSlotKey], match.slots[slotKey], match.similarity * match.weight);
     });
+  });
 
+  selectModeAwareMatches(rankedMatches, false, 10).forEach(function (match) {
     Object.keys(match.onsets).forEach(function (slotKey) {
       var parts = slotKey.split("|");
       var targetSlotKey = buildPartSlotKey(match.partIndex, parseInt(parts[0], 10), parseInt(parts[1], 10));
@@ -2085,6 +2135,7 @@ function buildFuzzyTuneHints(model, parsedTune) {
 
     rankedMatches.push({
       similarity: similarity,
+      modeMatch: entry.modeFamily === parsedTune.modeInfo.modeFamily,
       slots: entry.slots || {},
       onsets: entry.onsets || {},
       weight: entry.weight || 1
@@ -2095,7 +2146,7 @@ function buildFuzzyTuneHints(model, parsedTune) {
     return right.similarity - left.similarity;
   });
 
-  rankedMatches.slice(0, 6).forEach(function (match) {
+  selectModeAwareMatches(rankedMatches, true, 6).forEach(function (match) {
     Object.keys(match.slots).forEach(function (slotKey) {
       if (!output.tokens[slotKey]) {
         output.tokens[slotKey] = {};
@@ -2103,7 +2154,9 @@ function buildFuzzyTuneHints(model, parsedTune) {
 
       incrementCount(output.tokens[slotKey], match.slots[slotKey], match.similarity * match.weight);
     });
+  });
 
+  selectModeAwareMatches(rankedMatches, false, 6).forEach(function (match) {
     Object.keys(match.onsets).forEach(function (slotKey) {
       if (!output.onsets[slotKey]) {
         output.onsets[slotKey] = {};
@@ -2141,6 +2194,7 @@ function buildPredictedOnsetPath(model, parsedTune, decoderProfile, hintSources)
   for (i = 0; i < parsedTune.beatSlices.length; i += 1) {
     var slice = parsedTune.beatSlices[i];
     var fuzzySlotKey = buildPartSlotKey(slice.partIndex, slice.measureInPart, slice.beatInBar);
+    var cadenceOnsetBucket = model.counts.cadenceOnsetPositions[buildCadenceOnsetKey(slice, parsedTune)] || {};
     var measureHintToken = (hintSources.measurePatternHints[slice.rawBarIndex] || {})[String(slice.beatInBar)] || null;
     var onsetMeasureHint = (hintSources.onsetMeasurePatternHints[slice.rawBarIndex] || {})[String(slice.beatInBar)] || null;
     var partPatternOnsetHint = hintSources.partOnsetHints[fuzzySlotKey] || null;
@@ -2225,6 +2279,13 @@ function buildPredictedOnsetPath(model, parsedTune, decoderProfile, hintSources)
       localBias += 0.24;
     } else if (measureOnsetHint === "stay") {
       localBias -= 0.24;
+    }
+
+    if (!slice.isPickup && slice.measuresFromPartEnd !== null && slice.measuresFromPartEnd <= 2) {
+      localBias += decoderProfile.cadenceOnsetWeight * (
+        logDecisionProbability(cadenceOnsetBucket, "change", 1.0) -
+        logDecisionProbability(cadenceOnsetBucket, "stay", 1.0)
+      );
     }
 
     localBias = clamp(localBias, -3.1, 3.1);
@@ -2349,6 +2410,7 @@ function predictChordPath(model, parsedTune) {
     var slice = parsedTune.beatSlices[i];
     var candidates = getCandidateTokensForSlice(model, parsedTune, slice);
     var predictedOnsetLabel = predictedOnsetPath[i] || null;
+    var lockPredictedStay = decoderProfile.lockPredictedStays && i > 0 && predictedOnsetLabel === "stay";
     var measureHintToken = (measurePatternHints[slice.rawBarIndex] || {})[String(slice.beatInBar)];
     var previousMeasureHintToken = null;
     var fuzzySlotKey = buildPartSlotKey(slice.partIndex, slice.measureInPart, slice.beatInBar);
@@ -2488,6 +2550,10 @@ function predictChordPath(model, parsedTune) {
       mergeCandidateBucket(candidates, model.counts.typeModeOnsetChordTotals[buildTypeModeIdentityKey(slice, parsedTune)], 10);
     }
 
+    if (lockPredictedStay) {
+      candidates = Object.keys(layers[i - 1] || {});
+    }
+
     if (candidates.length === 0) {
       candidates = globalCandidates;
     }
@@ -2548,6 +2614,9 @@ function predictChordPath(model, parsedTune) {
 
       for (k = 0; k < previousTokens.length; k += 1) {
         var previousToken = previousTokens[k];
+        if (lockPredictedStay && previousToken !== token) {
+          continue;
+        }
         var transitionScore = logProbability(getTransitionBucket(model, styleKey, previousToken), token, 0.8, model.counts.chordTotals);
         var stayBonus = previousToken === token ? decoderProfile.stayBonus : 0;
         var changeBonus = previousToken === token ? (-1 * changePreference) : changePreference;
