@@ -22,6 +22,7 @@ This baseline now combines:
 - consensus-weighted training across multiple settings of the same tune
 - slot-level beat parsing so strong-beat onsets matter more than weak-note motion
 - per-type decoder profiles for reels, jigs, polkas, waltzes, and related families
+- learned bar-level onset patterns plus exact/fuzzy variant onset hints
 - melody compatibility scoring instead of contextless labels
 - explicit chord change modeling instead of relying only on token transitions
 - full-sequence decoding instead of per-beat independent guesses
@@ -46,9 +47,9 @@ On `2026-04-18`, using:
 
 the model reached:
 
-- Tune holdout: `53.76%` exact beat, `54.51%` root-only, `78.32%` change placement
-- On chord onsets only: `49.39%` exact, `50.06%` root-only
-- Type highlights: `54.82%` for jigs, `54.87%` for reels, `56.22%` for polkas, `53.44%` for waltzes
+- Tune holdout: `53.96%` exact beat, `54.71%` root-only, `78.53%` change placement
+- On chord onsets only: `49.56%` exact, `50.24%` root-only
+- Type highlights: `54.85%` for jigs, `55.08%` for reels, `56.12%` for polkas, `53.88%` for waltzes
 
 This matters because tune holdout is stricter than row holdout and gives a better read on generalization to unseen tunes, not just nearby settings.
 
