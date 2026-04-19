@@ -120,10 +120,13 @@ function createStatsBucket() {
     skippedTunes: 0,
     labeledBeats: 0,
     exactHits: 0,
+    softExactPoints: 0,
     rootHits: 0,
     changePlacementHits: 0,
+    softChangePlacementPoints: 0,
     changeOpportunities: 0,
     onsetExactHits: 0,
+    onsetSoftExactPoints: 0,
     onsetRootHits: 0,
     onsetCount: 0
   };
@@ -137,19 +140,64 @@ function ensureTypeBucket(stats, typeName) {
   return stats.byType[typeName];
 }
 
-function updateBeatStats(bucket, predictionToken, truthToken, previousTruthToken, previousPredToken) {
+function compatibilityScoreForTokens(predictionToken, truthToken, modeInfo) {
+  var predicted;
+  var truth;
+  var majorRoot;
+  var minorRoot;
+
+  if (predictionToken === truthToken) {
+    return 1;
+  }
+
+  predicted = theory.parseChordToken(predictionToken, modeInfo);
+  truth = theory.parseChordToken(truthToken, modeInfo);
+
+  if (predicted.quality === "maj" && truth.quality === "min") {
+    majorRoot = predicted.relativeRoot;
+    minorRoot = truth.relativeRoot;
+  } else if (predicted.quality === "min" && truth.quality === "maj") {
+    majorRoot = truth.relativeRoot;
+    minorRoot = predicted.relativeRoot;
+  } else {
+    return 0;
+  }
+
+  return theory.mod12(majorRoot - minorRoot) === 3 ? 0.5 : 0;
+}
+
+function softChangePlacementScore(truthChanged, predChanged) {
+  if (truthChanged === predChanged) {
+    return 1;
+  }
+
+  if (!truthChanged && predChanged) {
+    return 0.5;
+  }
+
+  return 0;
+}
+
+function updateBeatStats(bucket, predictionToken, truthToken, previousTruthToken, previousPredToken, modeInfo) {
+  var compatibilityScore;
+  var truthChanged;
+  var predChanged;
+
   bucket.labeledBeats += 1;
+  compatibilityScore = compatibilityScoreForTokens(predictionToken, truthToken, modeInfo);
 
   if (predictionToken === truthToken) {
     bucket.exactHits += 1;
   }
 
+  bucket.softExactPoints += compatibilityScore;
+
   if (String(predictionToken).split(":")[0] === String(truthToken).split(":")[0]) {
     bucket.rootHits += 1;
   }
 
-  var truthChanged = previousTruthToken === null || truthToken !== previousTruthToken;
-  var predChanged = previousPredToken === null || predictionToken !== previousPredToken;
+  truthChanged = previousTruthToken === null || truthToken !== previousTruthToken;
+  predChanged = previousPredToken === null || predictionToken !== previousPredToken;
 
   if (truthChanged) {
     bucket.onsetCount += 1;
@@ -157,6 +205,8 @@ function updateBeatStats(bucket, predictionToken, truthToken, previousTruthToken
     if (predictionToken === truthToken) {
       bucket.onsetExactHits += 1;
     }
+
+    bucket.onsetSoftExactPoints += compatibilityScore;
 
     if (String(predictionToken).split(":")[0] === String(truthToken).split(":")[0]) {
       bucket.onsetRootHits += 1;
@@ -168,6 +218,7 @@ function updateBeatStats(bucket, predictionToken, truthToken, previousTruthToken
     if (truthChanged === predChanged) {
       bucket.changePlacementHits += 1;
     }
+    bucket.softChangePlacementPoints += softChangePlacementScore(truthChanged, predChanged);
   }
 }
 
@@ -438,9 +489,12 @@ function summarizeEvaluation(stats) {
   console.log("  skipped tunes: " + stats.skippedTunes);
   console.log("  labeled beats: " + stats.labeledBeats);
   console.log("  exact beat accuracy: " + ratio(stats.exactHits, stats.labeledBeats));
+  console.log("  compatibility-weighted beat score: " + ratio(stats.softExactPoints, stats.labeledBeats));
   console.log("  root-only accuracy: " + ratio(stats.rootHits, stats.labeledBeats));
   console.log("  change placement accuracy: " + ratio(stats.changePlacementHits, stats.changeOpportunities));
+  console.log("  soft change placement score: " + ratio(stats.softChangePlacementPoints, stats.changeOpportunities));
   console.log("  onset exact accuracy: " + ratio(stats.onsetExactHits, stats.onsetCount));
+  console.log("  compatibility-weighted onset score: " + ratio(stats.onsetSoftExactPoints, stats.onsetCount));
   console.log("  onset root-only accuracy: " + ratio(stats.onsetRootHits, stats.onsetCount));
 
   Object.keys(stats.byType || {}).sort().forEach(function (typeName) {
@@ -611,8 +665,8 @@ function runEvaluate(commandArgs) {
         }
 
         evaluatedThisTune = true;
-        updateBeatStats(overall, predictions[i].token, truthChord.token, previousTruthToken, previousPredToken);
-        updateBeatStats(typeStats, predictions[i].token, truthChord.token, previousTruthToken, previousPredToken);
+        updateBeatStats(overall, predictions[i].token, truthChord.token, previousTruthToken, previousPredToken, parsedTruth.modeInfo);
+        updateBeatStats(typeStats, predictions[i].token, truthChord.token, previousTruthToken, previousPredToken, parsedTruth.modeInfo);
 
         previousTruthToken = truthChord.token;
         previousPredToken = predictions[i].token;
