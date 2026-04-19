@@ -46,6 +46,7 @@ function createEmptyModel() {
       onsetMeasureSignatureChordTotals: {},
       exactMelodyPaths: {},
       fuzzyPartLibrary: [],
+      fuzzyTuneLibrary: [],
       cadencePositions: {},
       emissions: {},
       slotEmissions: {},
@@ -244,6 +245,56 @@ function scorePartFingerprintSimilarity(targetMeasures, candidateMeasures) {
     (1.10 * cadenceMatches) -
     (0.60 * Math.abs(left.length - right.length))
   );
+}
+
+function buildTuneMeasureSignatures(parsedTune) {
+  return (parsedTune.measures || []).filter(function (measure) {
+    return !measure.isPickup;
+  }).map(function (measure) {
+    return measure.signature;
+  });
+}
+
+function buildTuneSlotMaps(parsedTune) {
+  var tokens = {};
+  var onsets = {};
+  var previousToken = null;
+
+  (parsedTune.beatSlices || []).forEach(function (slice) {
+    var normalized = slice.chord ? theory.normalizeChord(slice.chord.raw, parsedTune.modeInfo) : null;
+    if (!normalized || slice.isPickup || slice.beatInBar === null) {
+      return;
+    }
+
+    var slotKey = buildPartSlotKey(slice.partIndex, slice.measureInPart, slice.beatInBar);
+    var onsetKey = previousToken === null || previousToken !== normalized.token ? "change" : "stay";
+    tokens[slotKey] = normalized.token;
+    onsets[slotKey] = onsetKey;
+    previousToken = normalized.token;
+  });
+
+  return {
+    tokens: tokens,
+    onsets: onsets
+  };
+}
+
+function scoreTuneFingerprintSimilarity(targetSignatures, candidateSignatures) {
+  var base = scorePartFingerprintSimilarity(targetSignatures, candidateSignatures);
+  var targetLength = (targetSignatures || []).length;
+  var candidateLength = (candidateSignatures || []).length;
+
+  if (!isFinite(base)) {
+    return base;
+  }
+
+  if (targetLength === candidateLength) {
+    base += 0.75;
+  } else {
+    base -= 0.18 * Math.abs(targetLength - candidateLength);
+  }
+
+  return base;
 }
 
 function describeBucketLeader(bucket) {
@@ -552,6 +603,20 @@ function trainOnParsedTune(model, parsedTune, options) {
         slots: entry.slots,
         weight: tuneWeight
       });
+    });
+  }
+
+  if (usableLabels > 0) {
+    var tuneSlotMaps = buildTuneSlotMaps(parsedTune);
+    model.counts.fuzzyTuneLibrary.push({
+      styleKey: styleKey,
+      typeMeterKey: typeMeterKey,
+      modeFamily: parsedTune.modeInfo.modeFamily,
+      measureSignatures: buildTuneMeasureSignatures(parsedTune),
+      partCount: parsedTune.partFingerprints ? parsedTune.partFingerprints.length : 0,
+      slots: tuneSlotMaps.tokens,
+      onsets: tuneSlotMaps.onsets,
+      weight: tuneWeight
     });
   }
 
@@ -1243,6 +1308,75 @@ function buildFuzzyPartHints(model, parsedTune) {
   return output;
 }
 
+function buildFuzzyTuneHints(model, parsedTune) {
+  var entries = model.counts.fuzzyTuneLibrary || [];
+  var output = {
+    tokens: {},
+    onsets: {}
+  };
+  var targetSignatures = buildTuneMeasureSignatures(parsedTune);
+  var rankedMatches = [];
+
+  if (!entries.length || !targetSignatures.length) {
+    return output;
+  }
+
+  entries.forEach(function (entry) {
+    if (entry.typeMeterKey !== buildTypeMeterKey(parsedTune)) {
+      return;
+    }
+
+    if (entry.measureSignatures.length < Math.max(2, targetSignatures.length - 4) ||
+        entry.measureSignatures.length > targetSignatures.length + 4) {
+      return;
+    }
+
+    var similarity = scoreTuneFingerprintSimilarity(targetSignatures, entry.measureSignatures);
+    if (!isFinite(similarity) || similarity <= 4.0) {
+      return;
+    }
+
+    if (entry.modeFamily === parsedTune.modeInfo.modeFamily) {
+      similarity += 0.9;
+    }
+
+    if ((entry.partCount || 0) === ((parsedTune.partFingerprints || []).length || 0)) {
+      similarity += 0.45;
+    }
+
+    rankedMatches.push({
+      similarity: similarity,
+      slots: entry.slots || {},
+      onsets: entry.onsets || {},
+      weight: entry.weight || 1
+    });
+  });
+
+  rankedMatches.sort(function (left, right) {
+    return right.similarity - left.similarity;
+  });
+
+  rankedMatches.slice(0, 6).forEach(function (match) {
+    Object.keys(match.slots).forEach(function (slotKey) {
+      if (!output.tokens[slotKey]) {
+        output.tokens[slotKey] = {};
+      }
+
+      incrementCount(output.tokens[slotKey], match.slots[slotKey], match.similarity * match.weight);
+    });
+
+    Object.keys(match.onsets).forEach(function (slotKey) {
+      if (!output.onsets[slotKey]) {
+        output.onsets[slotKey] = {};
+      }
+
+      incrementCount(output.onsets[slotKey], match.onsets[slotKey], match.similarity * match.weight);
+    });
+  });
+
+  return output;
+}
+
 function getTransitionBucket(model, styleKey, previousToken) {
   var styleParts = String(styleKey).split("|");
   var typeMeterKey = styleParts.slice(0, 2).join("|");
@@ -1288,6 +1422,7 @@ function predictChordPath(model, parsedTune) {
   var onsetMeasurePatternHints = buildOnsetMeasurePatternHints(model, parsedTune);
   var exactMelodyPathHints = buildExactMelodyPathHints(model, parsedTune);
   var fuzzyPartHints = buildFuzzyPartHints(model, parsedTune);
+  var fuzzyTuneHints = buildFuzzyTuneHints(model, parsedTune);
   var i;
   var j;
 
@@ -1300,6 +1435,8 @@ function predictChordPath(model, parsedTune) {
     var fuzzySlotKey = buildPartSlotKey(slice.partIndex, slice.measureInPart, slice.beatInBar);
     var fuzzyHintBucket = fuzzyPartHints[fuzzySlotKey] || {};
     var fuzzyHintToken = selectTopKey(fuzzyHintBucket);
+    var fuzzyTuneOnsetBucket = fuzzyTuneHints.onsets[fuzzySlotKey] || {};
+    var fuzzyTuneOnsetHint = selectTopKey(fuzzyTuneOnsetBucket);
     var previousFuzzyHintToken = null;
     var onsetMeasureHint = (onsetMeasurePatternHints[slice.rawBarIndex] || {})[String(slice.beatInBar)] || null;
     var previousExactHintToken = i > 0 ? (exactMelodyPathHints[i - 1] || null) : null;
@@ -1349,6 +1486,12 @@ function predictChordPath(model, parsedTune) {
       changePreference += 0.38;
     } else if (fuzzyOnsetHint === "stay") {
       changePreference -= 0.38;
+    }
+
+    if (fuzzyTuneOnsetHint === "change") {
+      changePreference += 0.44;
+    } else if (fuzzyTuneOnsetHint === "stay") {
+      changePreference -= 0.44;
     }
 
     if (measureOnsetHint === "change") {
