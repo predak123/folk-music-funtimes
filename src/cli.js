@@ -14,9 +14,9 @@ function usage() {
   console.log("Usage:");
   console.log("  node src/cli.js download --out data/tunes.csv");
   console.log("  node src/cli.js train --csv data/tunes.csv --model artifacts/model.json [--limit 50000] [--types jig,reel]");
-  console.log("  node src/cli.js evaluate --csv data/tunes.csv [--limit 20000] [--holdout-every 5] [--holdout-by row|tune|melody] [--types jig,reel]");
-  console.log("  node src/cli.js predict --model artifacts/model.json --abc examples/input-no-chords.abc --meter 2/4 --mode Adorian --type polka [--write-abc output.abc]");
-  console.log("  node src/cli.js compare --csv data/tunes.csv --name \"Kesh, The\" [--setting-id 47264] [--model artifacts/the-session-model.json]");
+  console.log("  node src/cli.js evaluate --csv data/tunes.csv [--limit 20000] [--holdout-every 5] [--holdout-by row|tune|melody] [--types jig,reel] [--placement-first]");
+  console.log("  node src/cli.js predict --model artifacts/model.json --abc examples/input-no-chords.abc --meter 2/4 --mode Adorian --type polka [--write-abc output.abc] [--placement-first]");
+  console.log("  node src/cli.js compare --csv data/tunes.csv --name \"Kesh, The\" [--setting-id 47264] [--model artifacts/the-session-model.json] [--placement-first]");
 }
 
 function rowFromArray(headers, values) {
@@ -112,6 +112,10 @@ function parseHoldoutBy(value) {
   }
 
   return holdoutBy;
+}
+
+function usePlacementFirst(commandArgs) {
+  return !!commandArgs["placement-first"];
 }
 
 function createStatsBucket() {
@@ -327,6 +331,7 @@ function runCompare(commandArgs) {
   var headers = null;
   var selectedRow;
   var modelPath = commandArgs.model || DEFAULT_MODEL_PATH;
+  var placementFirst = usePlacementFirst(commandArgs);
 
   if (!csvPath || !queryName) {
     throw new Error("compare requires --csv and --name");
@@ -374,7 +379,8 @@ function runCompare(commandArgs) {
       abc: melodyAbc,
       meter: selectedRow.meter,
       mode: selectedRow.mode,
-      type: selectedRow.type
+      type: selectedRow.type,
+      placementFirst: placementFirst
     });
     var predictedAbc = abcParser.injectPredictedChords(melodyAbc, predictions);
 
@@ -387,6 +393,7 @@ function runCompare(commandArgs) {
     console.log("  mode: " + selectedRow.mode);
     console.log("  matched settings: " + rows.length);
     console.log("  model: " + modelPath);
+    console.log("  decoder mode: " + (placementFirst ? "placement-first" : "joint"));
     console.log("");
     console.log("Original Chorded ABC");
     console.log(selectedRow.abc);
@@ -480,6 +487,7 @@ function summarizeEvaluation(stats) {
 
   console.log("Evaluation summary");
   console.log("  holdout mode: " + stats.holdoutBy);
+  console.log("  decoder mode: " + (stats.placementFirst ? "placement-first" : "joint"));
   if (stats.typeFilterLabel) {
     console.log("  type filter: " + stats.typeFilterLabel);
   }
@@ -525,6 +533,7 @@ function runEvaluate(commandArgs) {
   var holdoutEvery = commandArgs["holdout-every"] ? parseInt(commandArgs["holdout-every"], 10) : 5;
   var holdoutBy = parseHoldoutBy(commandArgs["holdout-by"]);
   var typeFilter = parseTypeFilter(commandArgs.types);
+  var placementFirst = usePlacementFirst(commandArgs);
 
   if (!csvPath) {
     throw new Error("evaluate requires --csv");
@@ -543,6 +552,7 @@ function runEvaluate(commandArgs) {
     console.log("Filtering tune types to: " + Object.keys(typeFilter).sort().join(", "));
   }
   console.log("Grouping holdout by " + holdoutBy + ".");
+  console.log("Decoder mode: " + (placementFirst ? "placement-first" : "joint") + ".");
 
   return csv.parseCsvFile(csvPath, function (rowValues) {
     if (!headers) {
@@ -619,6 +629,7 @@ function runEvaluate(commandArgs) {
 
     var stats = {
       holdoutBy: holdoutBy,
+      placementFirst: placementFirst,
       typeFilterLabel: typeFilter ? Object.keys(typeFilter).sort().join(", ") : "",
       trainRows: trainRows,
       holdoutRows: holdoutRows.length,
@@ -644,7 +655,8 @@ function runEvaluate(commandArgs) {
           abc: abcParser.stripChordAnnotations(row.abc),
           meter: row.meter,
           mode: row.mode,
-          type: row.type
+          type: row.type,
+          placementFirst: placementFirst
         });
       } catch (error) {
         overall.skippedTunes += 1;
@@ -699,7 +711,8 @@ function runPredict(commandArgs) {
     abc: abcBody,
     meter: commandArgs.meter,
     mode: commandArgs.mode,
-    type: commandArgs.type || "unknown"
+    type: commandArgs.type || "unknown",
+    placementFirst: usePlacementFirst(commandArgs)
   };
   var predictions = modelApi.predictForTune(model, options);
   console.log(formatPredictions(predictions));

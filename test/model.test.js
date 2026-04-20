@@ -31,6 +31,34 @@ function run() {
   assert.strictEqual(predictions[2].displayChord, "G");
   assert.strictEqual(predictions[predictions.length - 1].displayChord, "Am");
 
+  var placementFirstPredictions = modelApi.predictForTune(model, {
+    abc: "EA AB|G2 B2|EA AB|G2 dB|A2 A2|",
+    meter: "2/4",
+    mode: "Adorian",
+    type: "polka",
+    placementFirst: true
+  });
+
+  assert.strictEqual(placementFirstPredictions[0].onsetLabel, "change");
+  assert.ok(placementFirstPredictions.some(function (prediction, index) {
+    return index > 0 && prediction.onsetLabel === "stay";
+  }));
+  assert.ok(placementFirstPredictions.some(function (prediction, index) {
+    return index > 0 && prediction.onsetLabel === "change";
+  }));
+  placementFirstPredictions.forEach(function (prediction, index) {
+    if (index === 0) {
+      return;
+    }
+
+    if (prediction.onsetLabel === "stay") {
+      assert.strictEqual(prediction.token, placementFirstPredictions[index - 1].token);
+      return;
+    }
+
+    assert.notStrictEqual(prediction.token, placementFirstPredictions[index - 1].token);
+  });
+
   var consensusModel = modelApi.createEmptyModel();
   modelApi.trainOnRows(consensusModel, [
     {

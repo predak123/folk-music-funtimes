@@ -1392,7 +1392,8 @@ function selectModeAwareMatches(matches, requireExactMode, limit) {
   return selected.slice(0, limit || selected.length);
 }
 
-function buildDecoderProfile(parsedTune) {
+function buildDecoderProfile(parsedTune, predictionOptions) {
+  predictionOptions = predictionOptions || {};
   var typeName = String(parsedTune.type || "unknown").toLowerCase();
   var modeFamily = parsedTune.modeInfo.modeFamily;
   var profile = {
@@ -1414,6 +1415,12 @@ function buildDecoderProfile(parsedTune) {
     cadenceTokenTransitionWeight: 0.16,
     onsetPathWeight: 0.22,
     onsetPathTransitionWeight: 0.52,
+    phraseOnsetWeight: 0,
+    placementRhythmWeight: 0,
+    beatStrengthBiasWeight: 0.35,
+    onsetConsensusWeight: 0,
+    onsetConsensusLockMargin: 0,
+    measureConsensusMinMargin: 0,
     lockPredictedStays: false,
     typeModeIdentityWeight: 0,
     harmonicFunctionWeight: 0,
@@ -1644,6 +1651,60 @@ function rhythmFamilyMultiplier(parsedTune, slice) {
   }
 
   return 1;
+}
+
+function scoreRhythmChangePrior(parsedTune, slice) {
+  var typeName = String(parsedTune.type || "").toLowerCase();
+
+  if (slice.isPickup || slice.beatInBar === null) {
+    return 0.12;
+  }
+
+  if (parsedTune.meterInfo.raw === "6/8" && ["jig", "slide"].indexOf(typeName) !== -1) {
+    if (slice.beatInBar === 0) {
+      return 0.72;
+    }
+
+    if (slice.beatInBar === 1) {
+      return 0.58;
+    }
+  }
+
+  if (parsedTune.meterInfo.raw === "9/8" && typeName === "slip jig") {
+    if (slice.beatInBar === 0) {
+      return 0.68;
+    }
+
+    if (slice.beatInBar === 1) {
+      return 0.48;
+    }
+
+    if (slice.beatInBar === 2) {
+      return 0.40;
+    }
+  }
+
+  if (parsedTune.meterInfo.raw === "4/4" && ["reel", "hornpipe", "strathspey", "march"].indexOf(typeName) !== -1) {
+    if (slice.beatInBar === 0) {
+      return 0.78;
+    }
+
+    if (slice.beatInBar === 2) {
+      return 0.42;
+    }
+
+    return -0.46;
+  }
+
+  if (parsedTune.meterInfo.raw === "2/4" && ["polka", "barndance"].indexOf(typeName) !== -1) {
+    return slice.beatInBar === 0 ? 0.56 : 0.10;
+  }
+
+  if (parsedTune.meterInfo.raw === "3/4" && ["waltz", "mazurka"].indexOf(typeName) !== -1) {
+    return slice.beatInBar === 0 ? 0.70 : -0.22;
+  }
+
+  return (beatStrength(slice, parsedTune.meterInfo) - 1) * 0.45;
 }
 
 function scoreStrongBeatOnsetFit(token, slice, parsedTune, modeInfo, chordTones, scalePitchClasses) {
@@ -2126,7 +2187,8 @@ function applyCadenceTonicRerank(model, currentLayer, slice, parsedTune, predict
   }
 }
 
-function scoreChangePreference(model, parsedTune, slice) {
+function scoreChangePreference(model, parsedTune, slice, decoderProfile) {
+  decoderProfile = decoderProfile || buildDecoderProfile(parsedTune);
   var styleBucket = model.counts.onsetStyles[buildStyleKey(parsedTune)] || {};
   var typeMeterBucket = model.counts.typeMeterOnsetStyles[buildTypeMeterKey(parsedTune)] || {};
   var styleBeatBucket = slice.beatInBar === null ? {} : (model.counts.styleBeatOnsetStyles[buildStyleBeatKey(slice, parsedTune)] || {});
@@ -2145,7 +2207,7 @@ function scoreChangePreference(model, parsedTune, slice) {
     (0.36 * logDecisionProbability(styleBeatBucket, "change", 1.1)) +
     (0.55 * logDecisionProbability(typeMeterBeatBucket, "change", 1.1)) +
     (0.32 * logDecisionProbability(roleBeatBucket, "change", 1.1)) +
-    (0.00 * logDecisionProbability(phraseBucket, "change", 1.1)) +
+    (decoderProfile.phraseOnsetWeight * logDecisionProbability(phraseBucket, "change", 1.1)) +
     (0.42 * logDecisionProbability(roleBucket, "change", 1.1)) +
     (0.70 * logDecisionProbability(positionBucket, "change", 1.1)) +
     (0.85 * logDecisionProbability(partBucket, "change", 1.1)) +
@@ -2159,7 +2221,7 @@ function scoreChangePreference(model, parsedTune, slice) {
     (0.36 * logDecisionProbability(styleBeatBucket, "stay", 1.1)) +
     (0.55 * logDecisionProbability(typeMeterBeatBucket, "stay", 1.1)) +
     (0.32 * logDecisionProbability(roleBeatBucket, "stay", 1.1)) +
-    (0.00 * logDecisionProbability(phraseBucket, "stay", 1.1)) +
+    (decoderProfile.phraseOnsetWeight * logDecisionProbability(phraseBucket, "stay", 1.1)) +
     (0.42 * logDecisionProbability(roleBucket, "stay", 1.1)) +
     (0.70 * logDecisionProbability(positionBucket, "stay", 1.1)) +
     (0.85 * logDecisionProbability(partBucket, "stay", 1.1)) +
@@ -2167,7 +2229,13 @@ function scoreChangePreference(model, parsedTune, slice) {
     (1.30 * logDecisionProbability(measureSignatureBucket, "stay", 1.1))
   );
 
-  return clamp(changeScore - stayScore + ((beatStrength(slice, parsedTune.meterInfo) - 1) * 0.35), -2.4, 2.4);
+  return clamp(
+    changeScore - stayScore +
+    ((beatStrength(slice, parsedTune.meterInfo) - 1) * decoderProfile.beatStrengthBiasWeight) +
+    (decoderProfile.placementRhythmWeight * scoreRhythmChangePrior(parsedTune, slice)),
+    -2.8,
+    2.8
+  );
 }
 
 function buildMeasurePatternHints(model, parsedTune) {
@@ -2586,9 +2654,18 @@ function buildPredictedOnsetPath(model, parsedTune, decoderProfile, hintSources)
     var previousMeasureHintToken = null;
     var measureOnsetHint = null;
     var exactOnsetHint = null;
-    var localBias = i === 0 ? (2.4 * decoderProfile.changeWeight) : (decoderProfile.changeWeight * scoreChangePreference(model, parsedTune, slice));
+    var onsetHintConsensus = 0;
+    var localBias = i === 0 ? (2.4 * decoderProfile.changeWeight) : (decoderProfile.changeWeight * scoreChangePreference(model, parsedTune, slice, decoderProfile));
     var currentLayer = {};
     var previousLayer;
+
+    function addOnsetConsensus(label, weight) {
+      if (label === "change") {
+        onsetHintConsensus += weight;
+      } else if (label === "stay") {
+        onsetHintConsensus -= weight;
+      }
+    }
 
     if (i > 0) {
       var previousSlice = parsedTune.beatSlices[i - 1];
@@ -2612,47 +2689,59 @@ function buildPredictedOnsetPath(model, parsedTune, decoderProfile, hintSources)
     } else if (onsetMeasureHint === "stay") {
       localBias -= 0.70;
     }
+    addOnsetConsensus(onsetMeasureHint, 1.35);
 
     if (partPatternOnsetHint === "change") {
       localBias += decoderProfile.partPatternOnsetWeight;
     } else if (partPatternOnsetHint === "stay") {
       localBias -= decoderProfile.partPatternOnsetWeight;
     }
+    addOnsetConsensus(partPatternOnsetHint, 1.0);
 
     if (exactOnsetHint === "change") {
       localBias += 0.95;
     } else if (exactOnsetHint === "stay") {
       localBias -= 0.95;
     }
+    addOnsetConsensus(exactOnsetHint, 1.55);
 
     if (canonicalOnsetHint === "change") {
       localBias += 0.78 * (canonicalOnsetLeader ? canonicalOnsetLeader.confidence : 1);
     } else if (canonicalOnsetHint === "stay") {
       localBias -= 0.78 * (canonicalOnsetLeader ? canonicalOnsetLeader.confidence : 1);
     }
+    addOnsetConsensus(canonicalOnsetHint, 1.15 * (canonicalOnsetLeader ? canonicalOnsetLeader.confidence : 1));
 
     if (partFamilyOnsetHint === "change") {
       localBias += decoderProfile.partFamilyOnsetWeight * (partFamilyOnsetLeader ? partFamilyOnsetLeader.confidence : 1);
     } else if (partFamilyOnsetHint === "stay") {
       localBias -= decoderProfile.partFamilyOnsetWeight * (partFamilyOnsetLeader ? partFamilyOnsetLeader.confidence : 1);
     }
+    addOnsetConsensus(partFamilyOnsetHint, 1.05 * (partFamilyOnsetLeader ? partFamilyOnsetLeader.confidence : 1));
 
     if (fuzzyTuneOnsetHint === "change") {
       localBias += 0.44;
     } else if (fuzzyTuneOnsetHint === "stay") {
       localBias -= 0.44;
     }
+    addOnsetConsensus(fuzzyTuneOnsetHint, 0.70);
 
     if (endingOnsetHint === "change") {
       localBias += 0.46;
     } else if (endingOnsetHint === "stay") {
       localBias -= 0.46;
     }
+    addOnsetConsensus(endingOnsetHint, 0.85);
 
     if (measureOnsetHint === "change") {
       localBias += 0.24;
     } else if (measureOnsetHint === "stay") {
       localBias -= 0.24;
+    }
+    addOnsetConsensus(measureOnsetHint, 0.55);
+
+    if (decoderProfile.onsetConsensusWeight) {
+      localBias += decoderProfile.onsetConsensusWeight * onsetHintConsensus;
     }
 
     if (!slice.isPickup && slice.measuresFromPartEnd !== null && slice.measuresFromPartEnd <= 2) {
@@ -2660,6 +2749,10 @@ function buildPredictedOnsetPath(model, parsedTune, decoderProfile, hintSources)
         logDecisionProbability(cadenceOnsetBucket, "change", 1.0) -
         logDecisionProbability(cadenceOnsetBucket, "stay", 1.0)
       );
+    }
+
+    if (decoderProfile.onsetConsensusLockMargin && Math.abs(onsetHintConsensus) >= decoderProfile.onsetConsensusLockMargin) {
+      localBias += onsetHintConsensus > 0 ? 1.1 : -1.1;
     }
 
     localBias = clamp(localBias, -3.1, 3.1);
@@ -2721,7 +2814,74 @@ function buildPredictedOnsetPath(model, parsedTune, decoderProfile, hintSources)
     bestLabel = layers[i][bestLabel].previous;
   }
 
+  if (Object.prototype.hasOwnProperty.call(path, 0)) {
+    path[0] = "change";
+  }
+
+  if (decoderProfile.measureConsensusMinMargin) {
+    path = applyMeasureConsensusToOnsetPath(parsedTune, path, decoderProfile);
+  }
+
   return path;
+}
+
+function applyMeasureConsensusToOnsetPath(parsedTune, onsetPath, decoderProfile) {
+  var groupedSlots = {};
+  var output = copyMap(onsetPath);
+
+  parsedTune.beatSlices.forEach(function (slice, index) {
+    var slotKey;
+    if (slice.isPickup || slice.beatInBar === null || !slice.measureSignature) {
+      return;
+    }
+
+    slotKey = [slice.measureSignature, slice.beatInBar].join("|");
+    if (!groupedSlots[slotKey]) {
+      groupedSlots[slotKey] = [];
+    }
+    groupedSlots[slotKey].push(index);
+  });
+
+  Object.keys(groupedSlots).forEach(function (slotKey) {
+    var indices = groupedSlots[slotKey];
+    var counts = {};
+    var orderedLabels;
+    var topLabel;
+    var runnerUpCount = 0;
+
+    if (indices.length < 2) {
+      return;
+    }
+
+    indices.forEach(function (index) {
+      var label = onsetPath[index] || (index === 0 ? "change" : "stay");
+      counts[label] = (counts[label] || 0) + 1;
+    });
+
+    orderedLabels = Object.keys(counts).sort(function (left, right) {
+      return counts[right] - counts[left];
+    });
+
+    topLabel = orderedLabels[0];
+    if (!topLabel) {
+      return;
+    }
+
+    if (orderedLabels[1]) {
+      runnerUpCount = counts[orderedLabels[1]];
+    }
+
+    if ((counts[topLabel] - runnerUpCount) < decoderProfile.measureConsensusMinMargin) {
+      return;
+    }
+
+    indices.forEach(function (index) {
+      output[index] = topLabel;
+    });
+  });
+
+  output[0] = "change";
+  return output;
 }
 
 function getCandidateTokens(model, parsedTune) {
@@ -2752,8 +2912,10 @@ function getCandidateTokens(model, parsedTune) {
   return output;
 }
 
-function predictChordPath(model, parsedTune) {
-  var decoderProfile = buildDecoderProfile(parsedTune);
+function predictChordPath(model, parsedTune, predictionOptions) {
+  predictionOptions = predictionOptions || {};
+  var decoderProfile = buildDecoderProfile(parsedTune, predictionOptions);
+  var placementFirst = !!predictionOptions.placementFirst;
   var globalCandidates = getCandidateTokens(model, parsedTune);
   var layers = [];
   var styleKey = buildStyleKey(parsedTune);
@@ -2784,7 +2946,7 @@ function predictChordPath(model, parsedTune) {
     var slice = parsedTune.beatSlices[i];
     var candidates = getCandidateTokensForSlice(model, parsedTune, slice);
     var predictedOnsetLabel = predictedOnsetPath[i] || null;
-    var lockPredictedStay = decoderProfile.lockPredictedStays && i > 0 && predictedOnsetLabel === "stay";
+    var lockPredictedStay = i > 0 && predictedOnsetLabel === "stay" && (placementFirst || decoderProfile.lockPredictedStays);
     var measureHintToken = (measurePatternHints[slice.rawBarIndex] || {})[String(slice.beatInBar)];
     var previousMeasureHintToken = null;
     var fuzzySlotKey = buildPartSlotKey(slice.partIndex, slice.measureInPart, slice.beatInBar);
@@ -2811,7 +2973,7 @@ function predictChordPath(model, parsedTune) {
     var exactOnsetHint = null;
     var fuzzyOnsetHint = null;
     var measureOnsetHint = null;
-    var changePreference = i === 0 ? (2.4 * decoderProfile.changeWeight) : (decoderProfile.changeWeight * scoreChangePreference(model, parsedTune, slice));
+    var changePreference = i === 0 ? (2.4 * decoderProfile.changeWeight) : (decoderProfile.changeWeight * scoreChangePreference(model, parsedTune, slice, decoderProfile));
 
     if (i > 0) {
       var previousSlice = parsedTune.beatSlices[i - 1];
@@ -2924,6 +3086,14 @@ function predictChordPath(model, parsedTune) {
       mergeCandidateBucket(candidates, model.counts.typeModeOnsetChordTotals[buildTypeModeIdentityKey(slice, parsedTune)], 10);
     }
 
+    if (placementFirst && i > 0 && predictedOnsetLabel === "change") {
+      globalCandidates.slice(0, 10).forEach(function (token) {
+        if (candidates.indexOf(token) === -1) {
+          candidates.push(token);
+        }
+      });
+    }
+
     if (lockPredictedStay) {
       candidates = Object.keys(layers[i - 1] || {});
     }
@@ -2993,6 +3163,9 @@ function predictChordPath(model, parsedTune) {
         if (lockPredictedStay && previousToken !== token) {
           continue;
         }
+        if (placementFirst && predictedOnsetLabel === "change" && previousToken === token) {
+          continue;
+        }
         var transitionScore = logProbability(getTransitionBucket(model, styleKey, previousToken), token, 0.8, model.counts.chordTotals);
         var stayBonus = previousToken === token ? decoderProfile.stayBonus : 0;
         var changeBonus = previousToken === token ? (-1 * changePreference) : changePreference;
@@ -3038,13 +3211,18 @@ function predictChordPath(model, parsedTune) {
     bestEndingToken = layers[i][bestEndingToken].previous;
   }
 
-  return path;
+  return {
+    tokens: path,
+    onsetPath: predictedOnsetPath
+  };
 }
 
 function predictForTune(model, options) {
   ensureModelShape(model);
   var parsedTune = abcParser.parseAbcTune(options);
-  var path = predictChordPath(model, parsedTune);
+  var decodedPath = predictChordPath(model, parsedTune, options || {});
+  var path = decodedPath.tokens;
+  var onsetPath = decodedPath.onsetPath || {};
 
   return path.map(function (token, index) {
     return {
@@ -3055,7 +3233,8 @@ function predictForTune(model, options) {
       isPickup: parsedTune.beatSlices[index].isPickup,
       token: token,
       displayChord: theory.chordTokenToDisplayName(token, parsedTune.modeInfo),
-      anchorIndex: parsedTune.beatSlices[index].anchorIndex
+      anchorIndex: parsedTune.beatSlices[index].anchorIndex,
+      onsetLabel: onsetPath[index] || (index === 0 ? "change" : "stay")
     };
   });
 }
