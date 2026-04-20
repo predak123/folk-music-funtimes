@@ -48,15 +48,29 @@ For this corpus-focused pass, the parser assumes an eighth-note default unit len
 
 ## Current held-out baseline
 
-On `2026-04-18`, using:
+On `2026-04-19`, using:
 
 - `node src/cli.js evaluate --csv data/tunes.csv --limit 10000 --holdout-every 5 --holdout-by tune`
 
-the model reached:
+the joint decoder reached:
 
-- Tune holdout: `54.45%` exact beat, `55.20%` root-only, `79.49%` change placement
-- On chord onsets only: `50.03%` exact, `50.69%` root-only
-- Type highlights: `54.56%` for jigs, `55.57%` for reels, `56.78%` for polkas, `54.56%` for waltzes
+- Tune holdout: `54.48%` exact beat, `55.23%` root-only, `79.56%` change placement
+- On chord onsets only: `50.01%` exact, `50.73%` root-only
+
+Using the stricter placement-first split:
+
+- `node src/cli.js evaluate --csv data/tunes.csv --limit 10000 --holdout-every 5 --holdout-by tune --placement-first`
+
+the onset-first decoder currently reaches:
+
+- Tune holdout: `46.03%` exact beat, `46.87%` root-only
+- Placement: `81.08%` change placement, `81.10%` onset-path placement
+- Softer musician-friendly placement: `85.76%`
+
+The repo also now includes an experimental pulse-template placement path:
+
+- add `--pulse-templates` to `evaluate`, `predict`, or `compare`
+- the pulse-template family model is implemented, but it has not yet beaten the plain placement-first baseline on the strict tune split
 
 This matters because tune holdout is stricter than row holdout and gives a better read on generalization to unseen tunes, not just nearby settings.
 
@@ -85,6 +99,8 @@ Evaluate with stricter grouping:
 ```powershell
 node src/cli.js evaluate --csv data/tunes.csv --limit 10000 --holdout-every 5 --holdout-by tune
 node src/cli.js evaluate --csv data/tunes.csv --limit 10000 --holdout-every 5 --holdout-by melody
+node src/cli.js evaluate --csv data/tunes.csv --limit 10000 --holdout-every 5 --holdout-by tune --placement-first
+node src/cli.js evaluate --csv data/tunes.csv --limit 10000 --holdout-every 5 --holdout-by tune --placement-first --pulse-templates
 ```
 
 Train or evaluate by tune type:
