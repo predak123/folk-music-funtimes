@@ -14,9 +14,9 @@ function usage() {
   console.log("Usage:");
   console.log("  node src/cli.js download --out data/tunes.csv");
   console.log("  node src/cli.js train --csv data/tunes.csv --model artifacts/model.json [--limit 50000] [--types jig,reel]");
-  console.log("  node src/cli.js evaluate --csv data/tunes.csv [--limit 20000] [--holdout-every 5] [--holdout-by row|tune|melody] [--types jig,reel] [--placement-first] [--onset-context-identity]");
-  console.log("  node src/cli.js predict --model artifacts/model.json --abc examples/input-no-chords.abc --meter 2/4 --mode Adorian --type polka [--write-abc output.abc] [--placement-first] [--onset-context-identity]");
-  console.log("  node src/cli.js compare --csv data/tunes.csv --name \"Kesh, The\" [--setting-id 47264] [--model artifacts/the-session-model.json] [--placement-first] [--onset-context-identity]");
+  console.log("  node src/cli.js evaluate --csv data/tunes.csv [--limit 20000] [--holdout-every 5] [--holdout-by row|tune|melody] [--types jig,reel] [--placement-first] [--onset-context-identity] [--onset-learner]");
+  console.log("  node src/cli.js predict --model artifacts/model.json --abc examples/input-no-chords.abc --meter 2/4 --mode Adorian --type polka [--write-abc output.abc] [--placement-first] [--onset-context-identity] [--onset-learner]");
+  console.log("  node src/cli.js compare --csv data/tunes.csv --name \"Kesh, The\" [--setting-id 47264] [--model artifacts/the-session-model.json] [--placement-first] [--onset-context-identity] [--onset-learner]");
 }
 
 function rowFromArray(headers, values) {
@@ -120,6 +120,10 @@ function usePlacementFirst(commandArgs) {
 
 function useOnsetContextIdentity(commandArgs) {
   return !!commandArgs["onset-context-identity"];
+}
+
+function useOnsetLearner(commandArgs) {
+  return !!commandArgs["onset-learner"];
 }
 
 function createStatsBucket() {
@@ -350,6 +354,7 @@ function runCompare(commandArgs) {
   var modelPath = commandArgs.model || DEFAULT_MODEL_PATH;
   var placementFirst = usePlacementFirst(commandArgs);
   var onsetContextIdentity = useOnsetContextIdentity(commandArgs);
+  var onsetLearner = useOnsetLearner(commandArgs);
 
   if (!csvPath || !queryName) {
     throw new Error("compare requires --csv and --name");
@@ -399,7 +404,8 @@ function runCompare(commandArgs) {
       mode: selectedRow.mode,
       type: selectedRow.type,
       placementFirst: placementFirst,
-      onsetContextIdentity: onsetContextIdentity
+      onsetContextIdentity: onsetContextIdentity,
+      useOnsetLearner: onsetLearner
     });
     var predictedAbc = abcParser.injectPredictedChords(melodyAbc, predictions);
 
@@ -415,6 +421,9 @@ function runCompare(commandArgs) {
     console.log("  decoder mode: " + (placementFirst ? "placement-first" : "joint"));
     if (placementFirst && onsetContextIdentity) {
       console.log("  identity stage: onset-context");
+    }
+    if (onsetLearner) {
+      console.log("  onset learner: experimental");
     }
     console.log("");
     console.log("Original Chorded ABC");
@@ -513,6 +522,9 @@ function summarizeEvaluation(stats) {
   if (stats.placementFirst && stats.onsetContextIdentity) {
     console.log("  identity stage: onset-context");
   }
+  if (stats.onsetLearner) {
+    console.log("  onset learner: experimental");
+  }
   if (stats.typeFilterLabel) {
     console.log("  type filter: " + stats.typeFilterLabel);
   }
@@ -563,6 +575,7 @@ function runEvaluate(commandArgs) {
   var typeFilter = parseTypeFilter(commandArgs.types);
   var placementFirst = usePlacementFirst(commandArgs);
   var onsetContextIdentity = useOnsetContextIdentity(commandArgs);
+  var onsetLearner = useOnsetLearner(commandArgs);
 
   if (!csvPath) {
     throw new Error("evaluate requires --csv");
@@ -584,6 +597,9 @@ function runEvaluate(commandArgs) {
   console.log("Decoder mode: " + (placementFirst ? "placement-first" : "joint") + ".");
   if (placementFirst && onsetContextIdentity) {
     console.log("Identity stage: onset-context.");
+  }
+  if (onsetLearner) {
+    console.log("Onset learner: experimental.");
   }
 
   return csv.parseCsvFile(csvPath, function (rowValues) {
@@ -663,6 +679,7 @@ function runEvaluate(commandArgs) {
       holdoutBy: holdoutBy,
       placementFirst: placementFirst,
       onsetContextIdentity: onsetContextIdentity,
+      onsetLearner: onsetLearner,
       typeFilterLabel: typeFilter ? Object.keys(typeFilter).sort().join(", ") : "",
       trainRows: trainRows,
       holdoutRows: holdoutRows.length,
@@ -690,7 +707,8 @@ function runEvaluate(commandArgs) {
           mode: row.mode,
           type: row.type,
           placementFirst: placementFirst,
-          onsetContextIdentity: onsetContextIdentity
+          onsetContextIdentity: onsetContextIdentity,
+          useOnsetLearner: onsetLearner
         });
       } catch (error) {
         overall.skippedTunes += 1;
@@ -747,7 +765,8 @@ function runPredict(commandArgs) {
     mode: commandArgs.mode,
     type: commandArgs.type || "unknown",
     placementFirst: usePlacementFirst(commandArgs),
-    onsetContextIdentity: useOnsetContextIdentity(commandArgs)
+    onsetContextIdentity: useOnsetContextIdentity(commandArgs),
+    useOnsetLearner: useOnsetLearner(commandArgs)
   };
   var predictions = modelApi.predictForTune(model, options);
   console.log(formatPredictions(predictions));

@@ -115,6 +115,8 @@ function run() {
   });
 
   assert.strictEqual(consensusPredictions[2].displayChord, "G");
+  assert.ok(consensusModel.learned);
+  assert.strictEqual(consensusModel.learned.onsetLearnerEpochs, 2);
 
   var upgradedModel = modelApi.createEmptyModel();
   delete upgradedModel.counts.cadenceFunctionTotals;
