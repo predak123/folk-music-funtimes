@@ -14,9 +14,9 @@ function usage() {
   console.log("Usage:");
   console.log("  node src/cli.js download --out data/tunes.csv");
   console.log("  node src/cli.js train --csv data/tunes.csv --model artifacts/model.json [--limit 50000] [--types jig,reel]");
-  console.log("  node src/cli.js evaluate --csv data/tunes.csv [--limit 20000] [--holdout-every 5] [--holdout-by row|tune|melody] [--types jig,reel] [--placement-first]");
-  console.log("  node src/cli.js predict --model artifacts/model.json --abc examples/input-no-chords.abc --meter 2/4 --mode Adorian --type polka [--write-abc output.abc] [--placement-first]");
-  console.log("  node src/cli.js compare --csv data/tunes.csv --name \"Kesh, The\" [--setting-id 47264] [--model artifacts/the-session-model.json] [--placement-first]");
+  console.log("  node src/cli.js evaluate --csv data/tunes.csv [--limit 20000] [--holdout-every 5] [--holdout-by row|tune|melody] [--types jig,reel] [--placement-first] [--onset-context-identity]");
+  console.log("  node src/cli.js predict --model artifacts/model.json --abc examples/input-no-chords.abc --meter 2/4 --mode Adorian --type polka [--write-abc output.abc] [--placement-first] [--onset-context-identity]");
+  console.log("  node src/cli.js compare --csv data/tunes.csv --name \"Kesh, The\" [--setting-id 47264] [--model artifacts/the-session-model.json] [--placement-first] [--onset-context-identity]");
 }
 
 function rowFromArray(headers, values) {
@@ -118,6 +118,10 @@ function usePlacementFirst(commandArgs) {
   return !!commandArgs["placement-first"];
 }
 
+function useOnsetContextIdentity(commandArgs) {
+  return !!commandArgs["onset-context-identity"];
+}
+
 function createStatsBucket() {
   return {
     evaluatedTunes: 0,
@@ -129,6 +133,9 @@ function createStatsBucket() {
     changePlacementHits: 0,
     softChangePlacementPoints: 0,
     changeOpportunities: 0,
+    onsetPathPlacementHits: 0,
+    onsetPathSoftChangePlacementPoints: 0,
+    onsetPathChangeOpportunities: 0,
     onsetExactHits: 0,
     onsetSoftExactPoints: 0,
     onsetRootHits: 0,
@@ -182,10 +189,11 @@ function softChangePlacementScore(truthChanged, predChanged) {
   return 0;
 }
 
-function updateBeatStats(bucket, predictionToken, truthToken, previousTruthToken, previousPredToken, modeInfo) {
+function updateBeatStats(bucket, predictionToken, truthToken, previousTruthToken, previousPredToken, modeInfo, predictionOnsetLabel) {
   var compatibilityScore;
   var truthChanged;
   var predChanged;
+  var pathChanged;
 
   bucket.labeledBeats += 1;
   compatibilityScore = compatibilityScoreForTokens(predictionToken, truthToken, modeInfo);
@@ -202,6 +210,7 @@ function updateBeatStats(bucket, predictionToken, truthToken, previousTruthToken
 
   truthChanged = previousTruthToken === null || truthToken !== previousTruthToken;
   predChanged = previousPredToken === null || predictionToken !== previousPredToken;
+  pathChanged = predictionOnsetLabel === "change";
 
   if (truthChanged) {
     bucket.onsetCount += 1;
@@ -223,6 +232,14 @@ function updateBeatStats(bucket, predictionToken, truthToken, previousTruthToken
       bucket.changePlacementHits += 1;
     }
     bucket.softChangePlacementPoints += softChangePlacementScore(truthChanged, predChanged);
+
+    if (predictionOnsetLabel) {
+      bucket.onsetPathChangeOpportunities += 1;
+      if (truthChanged === pathChanged) {
+        bucket.onsetPathPlacementHits += 1;
+      }
+      bucket.onsetPathSoftChangePlacementPoints += softChangePlacementScore(truthChanged, pathChanged);
+    }
   }
 }
 
@@ -332,6 +349,7 @@ function runCompare(commandArgs) {
   var selectedRow;
   var modelPath = commandArgs.model || DEFAULT_MODEL_PATH;
   var placementFirst = usePlacementFirst(commandArgs);
+  var onsetContextIdentity = useOnsetContextIdentity(commandArgs);
 
   if (!csvPath || !queryName) {
     throw new Error("compare requires --csv and --name");
@@ -380,7 +398,8 @@ function runCompare(commandArgs) {
       meter: selectedRow.meter,
       mode: selectedRow.mode,
       type: selectedRow.type,
-      placementFirst: placementFirst
+      placementFirst: placementFirst,
+      onsetContextIdentity: onsetContextIdentity
     });
     var predictedAbc = abcParser.injectPredictedChords(melodyAbc, predictions);
 
@@ -394,6 +413,9 @@ function runCompare(commandArgs) {
     console.log("  matched settings: " + rows.length);
     console.log("  model: " + modelPath);
     console.log("  decoder mode: " + (placementFirst ? "placement-first" : "joint"));
+    if (placementFirst && onsetContextIdentity) {
+      console.log("  identity stage: onset-context");
+    }
     console.log("");
     console.log("Original Chorded ABC");
     console.log(selectedRow.abc);
@@ -488,6 +510,9 @@ function summarizeEvaluation(stats) {
   console.log("Evaluation summary");
   console.log("  holdout mode: " + stats.holdoutBy);
   console.log("  decoder mode: " + (stats.placementFirst ? "placement-first" : "joint"));
+  if (stats.placementFirst && stats.onsetContextIdentity) {
+    console.log("  identity stage: onset-context");
+  }
   if (stats.typeFilterLabel) {
     console.log("  type filter: " + stats.typeFilterLabel);
   }
@@ -501,6 +526,8 @@ function summarizeEvaluation(stats) {
   console.log("  root-only accuracy: " + ratio(stats.rootHits, stats.labeledBeats));
   console.log("  change placement accuracy: " + ratio(stats.changePlacementHits, stats.changeOpportunities));
   console.log("  soft change placement score: " + ratio(stats.softChangePlacementPoints, stats.changeOpportunities));
+  console.log("  onset-path placement accuracy: " + ratio(stats.onsetPathPlacementHits, stats.onsetPathChangeOpportunities));
+  console.log("  onset-path soft placement score: " + ratio(stats.onsetPathSoftChangePlacementPoints, stats.onsetPathChangeOpportunities));
   console.log("  onset exact accuracy: " + ratio(stats.onsetExactHits, stats.onsetCount));
   console.log("  compatibility-weighted onset score: " + ratio(stats.onsetSoftExactPoints, stats.onsetCount));
   console.log("  onset root-only accuracy: " + ratio(stats.onsetRootHits, stats.onsetCount));
@@ -510,6 +537,7 @@ function summarizeEvaluation(stats) {
     console.log("  type " + typeName + ": exact " + ratio(bucket.exactHits, bucket.labeledBeats) +
       ", root " + ratio(bucket.rootHits, bucket.labeledBeats) +
       ", change " + ratio(bucket.changePlacementHits, bucket.changeOpportunities) +
+      ", onset-path " + ratio(bucket.onsetPathPlacementHits, bucket.onsetPathChangeOpportunities) +
       ", onset " + ratio(bucket.onsetExactHits, bucket.onsetCount) +
       ", tunes " + bucket.evaluatedTunes);
   });
@@ -534,6 +562,7 @@ function runEvaluate(commandArgs) {
   var holdoutBy = parseHoldoutBy(commandArgs["holdout-by"]);
   var typeFilter = parseTypeFilter(commandArgs.types);
   var placementFirst = usePlacementFirst(commandArgs);
+  var onsetContextIdentity = useOnsetContextIdentity(commandArgs);
 
   if (!csvPath) {
     throw new Error("evaluate requires --csv");
@@ -553,6 +582,9 @@ function runEvaluate(commandArgs) {
   }
   console.log("Grouping holdout by " + holdoutBy + ".");
   console.log("Decoder mode: " + (placementFirst ? "placement-first" : "joint") + ".");
+  if (placementFirst && onsetContextIdentity) {
+    console.log("Identity stage: onset-context.");
+  }
 
   return csv.parseCsvFile(csvPath, function (rowValues) {
     if (!headers) {
@@ -630,6 +662,7 @@ function runEvaluate(commandArgs) {
     var stats = {
       holdoutBy: holdoutBy,
       placementFirst: placementFirst,
+      onsetContextIdentity: onsetContextIdentity,
       typeFilterLabel: typeFilter ? Object.keys(typeFilter).sort().join(", ") : "",
       trainRows: trainRows,
       holdoutRows: holdoutRows.length,
@@ -656,7 +689,8 @@ function runEvaluate(commandArgs) {
           meter: row.meter,
           mode: row.mode,
           type: row.type,
-          placementFirst: placementFirst
+          placementFirst: placementFirst,
+          onsetContextIdentity: onsetContextIdentity
         });
       } catch (error) {
         overall.skippedTunes += 1;
@@ -677,8 +711,8 @@ function runEvaluate(commandArgs) {
         }
 
         evaluatedThisTune = true;
-        updateBeatStats(overall, predictions[i].token, truthChord.token, previousTruthToken, previousPredToken, parsedTruth.modeInfo);
-        updateBeatStats(typeStats, predictions[i].token, truthChord.token, previousTruthToken, previousPredToken, parsedTruth.modeInfo);
+        updateBeatStats(overall, predictions[i].token, truthChord.token, previousTruthToken, previousPredToken, parsedTruth.modeInfo, predictions[i].onsetLabel);
+        updateBeatStats(typeStats, predictions[i].token, truthChord.token, previousTruthToken, previousPredToken, parsedTruth.modeInfo, predictions[i].onsetLabel);
 
         previousTruthToken = truthChord.token;
         previousPredToken = predictions[i].token;
@@ -712,7 +746,8 @@ function runPredict(commandArgs) {
     meter: commandArgs.meter,
     mode: commandArgs.mode,
     type: commandArgs.type || "unknown",
-    placementFirst: usePlacementFirst(commandArgs)
+    placementFirst: usePlacementFirst(commandArgs),
+    onsetContextIdentity: useOnsetContextIdentity(commandArgs)
   };
   var predictions = modelApi.predictForTune(model, options);
   console.log(formatPredictions(predictions));

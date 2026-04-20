@@ -2296,6 +2296,21 @@ function buildOnsetMeasurePatternHints(model, parsedTune) {
   return hints;
 }
 
+function buildPredictionHintSources(model, parsedTune) {
+  return {
+    measurePatternHints: buildMeasurePatternHints(model, parsedTune),
+    onsetMeasurePatternHints: buildOnsetMeasurePatternHints(model, parsedTune),
+    partOnsetHints: buildPartPatternHints(model, parsedTune, "partOnsetPatterns"),
+    endingTokenHints: buildEndingPatternHints(model, parsedTune, "endingTokenPatterns"),
+    endingOnsetHints: buildEndingPatternHints(model, parsedTune, "endingOnsetPatterns"),
+    exactMelodyPathHints: buildExactMelodyPathHints(model, parsedTune),
+    canonicalMelodyHints: buildCanonicalMelodyHints(model, parsedTune),
+    fuzzyPartHints: buildFuzzyPartHints(model, parsedTune),
+    fuzzyPartFamilyHints: buildFuzzyPartFamilyHints(model, parsedTune),
+    fuzzyTuneHints: buildFuzzyTuneHints(model, parsedTune)
+  };
+}
+
 function buildEndingPatternHints(model, parsedTune, bucketName) {
   var output = {};
   var processedBlocks = {};
@@ -2387,6 +2402,209 @@ function buildExactMelodyPathHints(model, parsedTune) {
     acc[index] = token;
     return acc;
   }, {});
+}
+
+function buildIdentityEventSlice(parsedTune, onsetIndex, nextOnsetIndex) {
+  var onsetSlice = parsedTune.beatSlices[onsetIndex];
+  var eventSlice = Object.assign({}, onsetSlice, {
+    noteWeights: copyMap(onsetSlice.noteWeights || {}),
+    spanEndIndex: nextOnsetIndex - 1,
+    spanLength: Math.max(1, nextOnsetIndex - onsetIndex)
+  });
+  var index;
+
+  for (index = onsetIndex + 1; index < nextOnsetIndex; index += 1) {
+    Object.keys(parsedTune.beatSlices[index].noteWeights || {}).forEach(function (pcKey) {
+      eventSlice.noteWeights[pcKey] = (eventSlice.noteWeights[pcKey] || 0) + parsedTune.beatSlices[index].noteWeights[pcKey];
+    });
+  }
+
+  return eventSlice;
+}
+
+function buildPlacementFirstIdentityPath(model, parsedTune, decoderProfile, hintSources, predictedOnsetPath, globalCandidates) {
+  var onsetIndexes = [];
+  var onsetTokenByIndex = {};
+  var layers = [];
+  var styleKey = buildStyleKey(parsedTune);
+  var eventIndex;
+  var i;
+
+  for (i = 0; i < parsedTune.beatSlices.length; i += 1) {
+    if (i === 0 || predictedOnsetPath[i] === "change") {
+      onsetIndexes.push(i);
+    }
+  }
+
+  if (!onsetIndexes.length && parsedTune.beatSlices.length) {
+    onsetIndexes.push(0);
+  }
+
+  for (eventIndex = 0; eventIndex < onsetIndexes.length; eventIndex += 1) {
+    var onsetIndex = onsetIndexes[eventIndex];
+    var nextOnsetIndex = eventIndex + 1 < onsetIndexes.length ? onsetIndexes[eventIndex + 1] : parsedTune.beatSlices.length;
+    var slice = buildIdentityEventSlice(parsedTune, onsetIndex, nextOnsetIndex);
+    var candidates = getCandidateTokensForSlice(model, parsedTune, slice);
+    var fuzzySlotKey = buildPartSlotKey(slice.partIndex, slice.measureInPart, slice.beatInBar);
+    var measureHintToken = (hintSources.measurePatternHints[slice.rawBarIndex] || {})[String(slice.beatInBar)] || null;
+    var exactHintToken = hintSources.exactMelodyPathHints[onsetIndex] || null;
+    var canonicalHintBucket = hintSources.canonicalMelodyHints.tokens[fuzzySlotKey] || {};
+    var canonicalHintLeader = describeBucketLeader(canonicalHintBucket);
+    var canonicalHintToken = canonicalHintLeader ? canonicalHintLeader.token : null;
+    var fuzzyHintBucket = hintSources.fuzzyPartHints[fuzzySlotKey] || {};
+    var fuzzyHintToken = selectTopKey(fuzzyHintBucket);
+    var endingTokenHint = hintSources.endingTokenHints[fuzzySlotKey] || null;
+    var currentLayer = {};
+    var previousLayer;
+    var j;
+
+    globalCandidates.slice(0, 10).forEach(function (token) {
+      if (candidates.indexOf(token) === -1) {
+        candidates.push(token);
+      }
+    });
+    mergeCandidateBucket(candidates, model.counts.typeModeOnsetChordTotals[buildTypeModeIdentityKey(slice, parsedTune)], 10);
+
+    [measureHintToken, exactHintToken, canonicalHintToken, fuzzyHintToken, endingTokenHint].forEach(function (token) {
+      if (token && candidates.indexOf(token) === -1) {
+        candidates.unshift(token);
+      }
+    });
+
+    if (candidates.length === 0) {
+      candidates = globalCandidates.slice();
+    }
+
+    previousLayer = eventIndex > 0 ? layers[eventIndex - 1] : null;
+
+    for (j = 0; j < candidates.length; j += 1) {
+      var token = candidates[j];
+      var emissionScore = scoreEmission(model, token, slice, parsedTune.modeInfo, parsedTune, decoderProfile);
+      var sliceContextScore = scoreSliceContext(model, token, parsedTune, slice);
+      var endingFinalOnsetScore = scoreEndingFinalOnset(model, token, parsedTune, slice);
+      var typeModeIdentityScore = scoreTypeModeIdentity(model, token, parsedTune, slice, "change", decoderProfile);
+      var harmonicFunctionScore = scoreHarmonicFunction(model, token, parsedTune, slice, "change", "__START__", decoderProfile);
+      var cadenceResolutionScore = scoreCadenceResolution(model, token, parsedTune, slice, "change", "__START__", decoderProfile);
+      var cadenceTokenTransitionScore = scoreCadenceTokenTransition(model, token, parsedTune, slice, "change", "__START__", decoderProfile);
+      var minorPenultimateScore = scoreMinorPenultimateRerank(token, parsedTune, slice, "change", decoderProfile);
+      var measurePatternBonus = measureHintToken && measureHintToken === token ? decoderProfile.measurePatternBonus : 0;
+      var exactMelodyBonus = exactHintToken && exactHintToken === token ? decoderProfile.exactHintBonus : 0;
+      var canonicalMelodyBonus = canonicalHintToken && canonicalHintToken === token ? Math.min(
+        1.85,
+        0.70 + (0.95 * (canonicalHintLeader ? canonicalHintLeader.confidence : 1))
+      ) : 0;
+      var fuzzyPartBonus = fuzzyHintToken && fuzzyHintToken === token ? Math.min(
+        2.0,
+        decoderProfile.fuzzyHintWeight * (fuzzyHintBucket[token] || 0)
+      ) : 0;
+      var endingTokenBonus = endingTokenHint && endingTokenHint === token ? (slice.measuresFromPartEnd === 0 ? 1.05 : 0.72) : 0;
+
+      if (!previousLayer) {
+        var startTransition = logProbability(getTransitionBucket(model, styleKey, "__START__"), token, 0.8, model.counts.chordTotals);
+        currentLayer[token] = {
+          score: (decoderProfile.emissionWeight * emissionScore) +
+            (decoderProfile.contextWeight * sliceContextScore) +
+            endingFinalOnsetScore +
+            typeModeIdentityScore +
+            harmonicFunctionScore +
+            cadenceResolutionScore +
+            cadenceTokenTransitionScore +
+            minorPenultimateScore +
+            (decoderProfile.startTransitionWeight * startTransition) +
+            measurePatternBonus +
+            exactMelodyBonus +
+            canonicalMelodyBonus +
+            fuzzyPartBonus +
+            endingTokenBonus,
+          previous: null
+        };
+        continue;
+      }
+
+      var bestPrevious = null;
+      var bestScore = -Infinity;
+      var previousTokens = Object.keys(previousLayer);
+      var k;
+
+      for (k = 0; k < previousTokens.length; k += 1) {
+        var previousToken = previousTokens[k];
+        if (previousToken === token) {
+          continue;
+        }
+        var transitionScore = logProbability(getTransitionBucket(model, styleKey, previousToken), token, 0.8, model.counts.chordTotals);
+        var candidateScore = previousLayer[previousToken].score +
+          (decoderProfile.emissionWeight * emissionScore) +
+          (decoderProfile.contextWeight * sliceContextScore) +
+          endingFinalOnsetScore +
+          typeModeIdentityScore +
+          scoreHarmonicFunction(model, token, parsedTune, slice, "change", previousToken, decoderProfile) +
+          scoreCadenceResolution(model, token, parsedTune, slice, "change", previousToken, decoderProfile) +
+          scoreCadenceTokenTransition(model, token, parsedTune, slice, "change", previousToken, decoderProfile) +
+          minorPenultimateScore +
+          (decoderProfile.transitionWeight * transitionScore) +
+          measurePatternBonus +
+          exactMelodyBonus +
+          canonicalMelodyBonus +
+          fuzzyPartBonus +
+          endingTokenBonus;
+
+        if (eventIndex === onsetIndexes.length - 1 && token.indexOf("1:") === 0) {
+          candidateScore += decoderProfile.finalTonicBonus;
+        }
+
+        if (candidateScore > bestScore) {
+          bestScore = candidateScore;
+          bestPrevious = previousToken;
+        }
+      }
+
+      currentLayer[token] = {
+        score: bestScore,
+        previous: bestPrevious
+      };
+    }
+
+    applyCadenceTonicRerank(model, currentLayer, slice, parsedTune, "change", decoderProfile);
+    layers.push(currentLayer);
+  }
+
+  if (!layers.length) {
+    return globalCandidates.length ? parsedTune.beatSlices.map(function () { return globalCandidates[0]; }) : [];
+  }
+
+  var onsetPath = [];
+  var lastLayer = layers[layers.length - 1];
+  var bestEndingToken = null;
+  var bestEndingScore = -Infinity;
+
+  Object.keys(lastLayer).forEach(function (token) {
+    if (lastLayer[token].score > bestEndingScore) {
+      bestEndingScore = lastLayer[token].score;
+      bestEndingToken = token;
+    }
+  });
+
+  for (eventIndex = layers.length - 1; eventIndex >= 0; eventIndex -= 1) {
+    onsetPath.unshift(bestEndingToken);
+    bestEndingToken = layers[eventIndex][bestEndingToken].previous;
+  }
+
+  for (eventIndex = 0; eventIndex < onsetIndexes.length; eventIndex += 1) {
+    onsetTokenByIndex[onsetIndexes[eventIndex]] = onsetPath[eventIndex];
+  }
+
+  var expandedPath = [];
+  var activeToken = onsetPath[0] || globalCandidates[0] || null;
+
+  for (i = 0; i < parsedTune.beatSlices.length; i += 1) {
+    if (Object.prototype.hasOwnProperty.call(onsetTokenByIndex, i)) {
+      activeToken = onsetTokenByIndex[i];
+    }
+
+    expandedPath.push(activeToken);
+  }
+
+  return expandedPath;
 }
 
 function buildCanonicalMelodyHints(model, parsedTune) {
@@ -2916,60 +3134,59 @@ function predictChordPath(model, parsedTune, predictionOptions) {
   predictionOptions = predictionOptions || {};
   var decoderProfile = buildDecoderProfile(parsedTune, predictionOptions);
   var placementFirst = !!predictionOptions.placementFirst;
+  var onsetContextIdentity = !!predictionOptions.onsetContextIdentity;
   var globalCandidates = getCandidateTokens(model, parsedTune);
   var layers = [];
   var styleKey = buildStyleKey(parsedTune);
-  var measurePatternHints = buildMeasurePatternHints(model, parsedTune);
-  var onsetMeasurePatternHints = buildOnsetMeasurePatternHints(model, parsedTune);
-  var partOnsetHints = buildPartPatternHints(model, parsedTune, "partOnsetPatterns");
-  var endingTokenHints = buildEndingPatternHints(model, parsedTune, "endingTokenPatterns");
-  var endingOnsetHints = buildEndingPatternHints(model, parsedTune, "endingOnsetPatterns");
-  var exactMelodyPathHints = buildExactMelodyPathHints(model, parsedTune);
-  var canonicalMelodyHints = buildCanonicalMelodyHints(model, parsedTune);
-  var fuzzyPartHints = buildFuzzyPartHints(model, parsedTune);
-  var fuzzyPartFamilyHints = buildFuzzyPartFamilyHints(model, parsedTune);
-  var fuzzyTuneHints = buildFuzzyTuneHints(model, parsedTune);
+  var hintSources = buildPredictionHintSources(model, parsedTune);
   var predictedOnsetPath = buildPredictedOnsetPath(model, parsedTune, decoderProfile, {
-    measurePatternHints: measurePatternHints,
-    onsetMeasurePatternHints: onsetMeasurePatternHints,
-    partOnsetHints: partOnsetHints,
-    endingOnsetHints: endingOnsetHints,
-    exactMelodyPathHints: exactMelodyPathHints,
-    canonicalMelodyHints: canonicalMelodyHints,
-    fuzzyPartFamilyHints: fuzzyPartFamilyHints,
-    fuzzyTuneHints: fuzzyTuneHints
+    measurePatternHints: hintSources.measurePatternHints,
+    onsetMeasurePatternHints: hintSources.onsetMeasurePatternHints,
+    partOnsetHints: hintSources.partOnsetHints,
+    endingOnsetHints: hintSources.endingOnsetHints,
+    exactMelodyPathHints: hintSources.exactMelodyPathHints,
+    canonicalMelodyHints: hintSources.canonicalMelodyHints,
+    fuzzyPartFamilyHints: hintSources.fuzzyPartFamilyHints,
+    fuzzyTuneHints: hintSources.fuzzyTuneHints
   });
   var i;
   var j;
+
+  if (placementFirst && onsetContextIdentity) {
+    return {
+      tokens: buildPlacementFirstIdentityPath(model, parsedTune, decoderProfile, hintSources, predictedOnsetPath, globalCandidates),
+      onsetPath: predictedOnsetPath
+    };
+  }
 
   for (i = 0; i < parsedTune.beatSlices.length; i += 1) {
     var slice = parsedTune.beatSlices[i];
     var candidates = getCandidateTokensForSlice(model, parsedTune, slice);
     var predictedOnsetLabel = predictedOnsetPath[i] || null;
     var lockPredictedStay = i > 0 && predictedOnsetLabel === "stay" && (placementFirst || decoderProfile.lockPredictedStays);
-    var measureHintToken = (measurePatternHints[slice.rawBarIndex] || {})[String(slice.beatInBar)];
+    var measureHintToken = (hintSources.measurePatternHints[slice.rawBarIndex] || {})[String(slice.beatInBar)];
     var previousMeasureHintToken = null;
     var fuzzySlotKey = buildPartSlotKey(slice.partIndex, slice.measureInPart, slice.beatInBar);
-    var partPatternOnsetHint = partOnsetHints[fuzzySlotKey] || null;
-    var exactHintToken = exactMelodyPathHints[i] || null;
-    var canonicalHintBucket = canonicalMelodyHints.tokens[fuzzySlotKey] || {};
+    var partPatternOnsetHint = hintSources.partOnsetHints[fuzzySlotKey] || null;
+    var exactHintToken = hintSources.exactMelodyPathHints[i] || null;
+    var canonicalHintBucket = hintSources.canonicalMelodyHints.tokens[fuzzySlotKey] || {};
     var canonicalHintLeader = describeBucketLeader(canonicalHintBucket);
     var canonicalHintToken = canonicalHintLeader ? canonicalHintLeader.token : null;
-    var canonicalOnsetBucket = canonicalMelodyHints.onsets[fuzzySlotKey] || {};
+    var canonicalOnsetBucket = hintSources.canonicalMelodyHints.onsets[fuzzySlotKey] || {};
     var canonicalOnsetLeader = describeBucketLeader(canonicalOnsetBucket);
     var canonicalOnsetHint = canonicalOnsetLeader ? canonicalOnsetLeader.token : null;
-    var fuzzyHintBucket = fuzzyPartHints[fuzzySlotKey] || {};
+    var fuzzyHintBucket = hintSources.fuzzyPartHints[fuzzySlotKey] || {};
     var fuzzyHintToken = selectTopKey(fuzzyHintBucket);
-    var partFamilyOnsetBucket = fuzzyPartFamilyHints.onsets[fuzzySlotKey] || {};
+    var partFamilyOnsetBucket = hintSources.fuzzyPartFamilyHints.onsets[fuzzySlotKey] || {};
     var partFamilyOnsetLeader = describeBucketLeader(partFamilyOnsetBucket);
     var partFamilyOnsetHint = partFamilyOnsetLeader ? partFamilyOnsetLeader.token : null;
-    var fuzzyTuneOnsetBucket = fuzzyTuneHints.onsets[fuzzySlotKey] || {};
+    var fuzzyTuneOnsetBucket = hintSources.fuzzyTuneHints.onsets[fuzzySlotKey] || {};
     var fuzzyTuneOnsetHint = selectTopKey(fuzzyTuneOnsetBucket);
-    var endingTokenHint = endingTokenHints[fuzzySlotKey] || null;
-    var endingOnsetHint = endingOnsetHints[fuzzySlotKey] || null;
+    var endingTokenHint = hintSources.endingTokenHints[fuzzySlotKey] || null;
+    var endingOnsetHint = hintSources.endingOnsetHints[fuzzySlotKey] || null;
     var previousFuzzyHintToken = null;
-    var onsetMeasureHint = (onsetMeasurePatternHints[slice.rawBarIndex] || {})[String(slice.beatInBar)] || null;
-    var previousExactHintToken = i > 0 ? (exactMelodyPathHints[i - 1] || null) : null;
+    var onsetMeasureHint = (hintSources.onsetMeasurePatternHints[slice.rawBarIndex] || {})[String(slice.beatInBar)] || null;
+    var previousExactHintToken = i > 0 ? (hintSources.exactMelodyPathHints[i - 1] || null) : null;
     var exactOnsetHint = null;
     var fuzzyOnsetHint = null;
     var measureOnsetHint = null;
@@ -2977,9 +3194,9 @@ function predictChordPath(model, parsedTune, predictionOptions) {
 
     if (i > 0) {
       var previousSlice = parsedTune.beatSlices[i - 1];
-      previousMeasureHintToken = (measurePatternHints[previousSlice.rawBarIndex] || {})[String(previousSlice.beatInBar)] || null;
+      previousMeasureHintToken = (hintSources.measurePatternHints[previousSlice.rawBarIndex] || {})[String(previousSlice.beatInBar)] || null;
       var previousFuzzySlotKey = buildPartSlotKey(previousSlice.partIndex, previousSlice.measureInPart, previousSlice.beatInBar);
-      previousFuzzyHintToken = selectTopKey(fuzzyPartHints[previousFuzzySlotKey] || {});
+      previousFuzzyHintToken = selectTopKey(hintSources.fuzzyPartHints[previousFuzzySlotKey] || {});
     }
 
     if (exactHintToken && previousExactHintToken) {

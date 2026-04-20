@@ -59,6 +59,29 @@ function run() {
     assert.notStrictEqual(prediction.token, placementFirstPredictions[index - 1].token);
   });
 
+  var onsetContextPredictions = modelApi.predictForTune(model, {
+    abc: "EA AB|G2 B2|EA AB|G2 dB|A2 A2|",
+    meter: "2/4",
+    mode: "Adorian",
+    type: "polka",
+    placementFirst: true,
+    onsetContextIdentity: true
+  });
+
+  assert.strictEqual(onsetContextPredictions[0].onsetLabel, "change");
+  onsetContextPredictions.forEach(function (prediction, index) {
+    if (index === 0) {
+      return;
+    }
+
+    if (prediction.onsetLabel === "stay") {
+      assert.strictEqual(prediction.token, onsetContextPredictions[index - 1].token);
+      return;
+    }
+
+    assert.notStrictEqual(prediction.token, onsetContextPredictions[index - 1].token);
+  });
+
   var consensusModel = modelApi.createEmptyModel();
   modelApi.trainOnRows(consensusModel, [
     {
