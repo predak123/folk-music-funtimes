@@ -67,6 +67,9 @@ the onset-first decoder currently reaches:
 - Placement: `81.08%` change placement, `81.10%` onset-path placement
 - Softer musician-friendly placement: `85.76%`
 
+The CLI also supports The Session's separate `tune_popularity.csv` dataset via `--popularity-csv`.
+On a smaller `2000`-row tune holdout, that nudged placement from about `81.30%` to `81.35%`, but on the stricter `10000`-row run it did not beat the default baseline, so it remains opt-in instead of on by default.
+
 The repo also now includes an experimental pulse-template placement path:
 
 - add `--pulse-templates` to `evaluate`, `predict`, or `compare`
@@ -86,6 +89,7 @@ Train a model:
 
 ```powershell
 node src/cli.js train --csv data/tunes.csv --model artifacts/the-session-model.json --limit 50000
+node src/cli.js train --csv data/tunes.csv --popularity-csv data/tune_popularity.csv --model artifacts/the-session-model.json --limit 50000
 ```
 
 Evaluate on held-out chorded tunes:
@@ -101,6 +105,7 @@ node src/cli.js evaluate --csv data/tunes.csv --limit 10000 --holdout-every 5 --
 node src/cli.js evaluate --csv data/tunes.csv --limit 10000 --holdout-every 5 --holdout-by melody
 node src/cli.js evaluate --csv data/tunes.csv --limit 10000 --holdout-every 5 --holdout-by tune --placement-first
 node src/cli.js evaluate --csv data/tunes.csv --limit 10000 --holdout-every 5 --holdout-by tune --placement-first --pulse-templates
+node src/cli.js evaluate --csv data/tunes.csv --popularity-csv data/tune_popularity.csv --limit 10000 --holdout-every 5 --holdout-by tune --placement-first
 ```
 
 Train or evaluate by tune type:

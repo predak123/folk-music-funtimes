@@ -8,15 +8,16 @@ var abcParser = require("./music/abc");
 var theory = require("./music/theory");
 
 var DEFAULT_TUNES_URL = "https://raw.githubusercontent.com/adactio/TheSession-data/main/csv/tunes.csv";
+var DEFAULT_TUNE_POPULARITY_URL = "https://raw.githubusercontent.com/adactio/TheSession-data/main/csv/tune_popularity.csv";
 var DEFAULT_MODEL_PATH = path.join("artifacts", "the-session-model.json");
 
 function usage() {
   console.log("Usage:");
-  console.log("  node src/cli.js download --out data/tunes.csv");
-  console.log("  node src/cli.js train --csv data/tunes.csv --model artifacts/model.json [--limit 50000] [--types jig,reel]");
-  console.log("  node src/cli.js evaluate --csv data/tunes.csv [--limit 20000] [--holdout-every 5] [--holdout-by row|tune|melody] [--types jig,reel] [--placement-first] [--onset-context-identity] [--onset-learner] [--pulse-templates]");
+  console.log("  node src/cli.js download --out data/tunes.csv [--popularity-out data/tune_popularity.csv]");
+  console.log("  node src/cli.js train --csv data/tunes.csv --model artifacts/model.json [--limit 50000] [--types jig,reel] [--popularity-csv data/tune_popularity.csv]");
+  console.log("  node src/cli.js evaluate --csv data/tunes.csv [--limit 20000] [--holdout-every 5] [--holdout-by row|tune|melody] [--types jig,reel] [--popularity-csv data/tune_popularity.csv] [--placement-first] [--onset-context-identity] [--onset-learner] [--pulse-templates]");
   console.log("  node src/cli.js predict --model artifacts/model.json --abc examples/input-no-chords.abc --meter 2/4 --mode Adorian --type polka [--write-abc output.abc] [--placement-first] [--onset-context-identity] [--onset-learner] [--pulse-templates]");
-  console.log("  node src/cli.js compare --csv data/tunes.csv --name \"Kesh, The\" [--setting-id 47264] [--model artifacts/the-session-model.json] [--placement-first] [--onset-context-identity] [--onset-learner] [--pulse-templates]");
+  console.log("  node src/cli.js compare --csv data/tunes.csv --name \"Kesh, The\" [--setting-id 47264] [--model artifacts/the-session-model.json] [--popularity-csv data/tune_popularity.csv] [--placement-first] [--onset-context-identity] [--onset-learner] [--pulse-templates]");
 }
 
 function rowFromArray(headers, values) {
@@ -128,6 +129,70 @@ function useOnsetLearner(commandArgs) {
 
 function usePulseTemplates(commandArgs) {
   return !!commandArgs["pulse-templates"];
+}
+
+function parseInteger(value) {
+  var numeric = parseInt(String(value || "").trim(), 10);
+  return isFinite(numeric) ? numeric : null;
+}
+
+function resolvePopularityCsvPath(commandArgs, csvPath) {
+  var explicitPath = commandArgs["popularity-csv"];
+
+  if (explicitPath) {
+    return explicitPath;
+  }
+
+  return "";
+}
+
+function loadPopularityMap(popularityCsvPath) {
+  var headers = null;
+  var popularityByTuneId = {};
+
+  if (!popularityCsvPath) {
+    return Promise.resolve(popularityByTuneId);
+  }
+
+  return csv.parseCsvFile(popularityCsvPath, function (rowValues) {
+    var row;
+    var tuneId;
+    var tunebooks;
+
+    if (!headers) {
+      headers = rowValues;
+      return;
+    }
+
+    row = rowFromArray(headers, rowValues);
+    tuneId = String(row.tune_id || "").trim();
+    tunebooks = parseInteger(row.tunebooks);
+
+    if (!tuneId || tunebooks === null) {
+      return;
+    }
+
+    popularityByTuneId[tuneId] = {
+      tunebooks: tunebooks,
+      name: row.name || ""
+    };
+  }).then(function () {
+    return popularityByTuneId;
+  });
+}
+
+function decorateRowsWithPopularity(rows, popularityByTuneId) {
+  (rows || []).forEach(function (row) {
+    var popularityEntry = popularityByTuneId[String(row.tune_id || "").trim()];
+    if (!popularityEntry) {
+      return;
+    }
+
+    row.tune_popularity = String(popularityEntry.tunebooks);
+    row.tunebooks = String(popularityEntry.tunebooks);
+  });
+
+  return rows;
 }
 
 function createStatsBucket() {
@@ -293,8 +358,14 @@ function chooseComparisonRow(rows, commandArgs) {
     var leftChorded = left.abc.indexOf("\"") !== -1 ? 1 : 0;
     var rightChorded = right.abc.indexOf("\"") !== -1 ? 1 : 0;
     var chordDiff = rightChorded - leftChorded;
+    var popularityDiff;
     if (chordDiff !== 0) {
       return chordDiff;
+    }
+
+    popularityDiff = parseInteger(right.tune_popularity || right.tunebooks || "0") - parseInteger(left.tune_popularity || left.tunebooks || "0");
+    if (popularityDiff !== 0) {
+      return popularityDiff;
     }
 
     return parseInt(left.setting_id || "0", 10) - parseInt(right.setting_id || "0", 10);
@@ -356,6 +427,7 @@ function runCompare(commandArgs) {
   var headers = null;
   var selectedRow;
   var modelPath = commandArgs.model || DEFAULT_MODEL_PATH;
+  var popularityCsvPath = resolvePopularityCsvPath(commandArgs, csvPath);
   var placementFirst = usePlacementFirst(commandArgs);
   var onsetContextIdentity = useOnsetContextIdentity(commandArgs);
   var onsetLearner = useOnsetLearner(commandArgs);
@@ -382,6 +454,9 @@ function runCompare(commandArgs) {
 
     rows.push(row);
   }).then(function () {
+    return loadPopularityMap(popularityCsvPath);
+  }).then(function (popularityByTuneId) {
+    decorateRowsWithPopularity(rows, popularityByTuneId);
     if (!rows.length) {
       throw new Error("No tunes matched --name " + queryName);
     }
@@ -448,8 +523,12 @@ function runCompare(commandArgs) {
 
 function runDownload(commandArgs) {
   var outPath = commandArgs.out || path.join("data", "tunes.csv");
+  var popularityOutPath = commandArgs["popularity-out"] || path.join(path.dirname(outPath), "tune_popularity.csv");
   console.log("Downloading The Session tunes CSV to " + outPath);
   return io.downloadFile(DEFAULT_TUNES_URL, outPath).then(function () {
+    console.log("Downloading The Session tune popularity CSV to " + popularityOutPath);
+    return io.downloadFile(DEFAULT_TUNE_POPULARITY_URL, popularityOutPath);
+  }).then(function () {
     console.log("Download complete.");
   });
 }
@@ -459,6 +538,7 @@ function runTrain(commandArgs) {
   var modelPath = commandArgs.model;
   var limit = commandArgs.limit ? parseInt(commandArgs.limit, 10) : null;
   var typeFilter = parseTypeFilter(commandArgs.types);
+  var popularityCsvPath = resolvePopularityCsvPath(commandArgs, csvPath);
 
   if (!csvPath || !modelPath) {
     throw new Error("train requires --csv and --model");
@@ -474,6 +554,9 @@ function runTrain(commandArgs) {
   console.log("Training from " + csvPath);
   if (typeFilter) {
     console.log("Filtering tune types to: " + Object.keys(typeFilter).sort().join(", "));
+  }
+  if (popularityCsvPath) {
+    console.log("Using tune popularity from " + popularityCsvPath);
   }
 
   return csv.parseCsvFile(csvPath, function (rowValues) {
@@ -502,6 +585,9 @@ function runTrain(commandArgs) {
       console.log("Processed " + processed + " rows. Queued " + rowsToTrain.length + " training candidates. Skipped " + skipped + ".");
     }
   }).then(function () {
+    return loadPopularityMap(popularityCsvPath);
+  }).then(function (popularityByTuneId) {
+    decorateRowsWithPopularity(rowsToTrain, popularityByTuneId);
     var trainingSummary = modelApi.trainOnRows(model, rowsToTrain);
     trained = trainingSummary.trainedRows;
     skipped += trainingSummary.skippedRows;
@@ -585,6 +671,7 @@ function runEvaluate(commandArgs) {
   var holdoutEvery = commandArgs["holdout-every"] ? parseInt(commandArgs["holdout-every"], 10) : 5;
   var holdoutBy = parseHoldoutBy(commandArgs["holdout-by"]);
   var typeFilter = parseTypeFilter(commandArgs.types);
+  var popularityCsvPath = resolvePopularityCsvPath(commandArgs, csvPath);
   var placementFirst = usePlacementFirst(commandArgs);
   var onsetContextIdentity = useOnsetContextIdentity(commandArgs);
   var onsetLearner = useOnsetLearner(commandArgs);
@@ -616,6 +703,9 @@ function runEvaluate(commandArgs) {
   }
   if (pulseTemplates) {
     console.log("Pulse templates: experimental.");
+  }
+  if (popularityCsvPath) {
+    console.log("Using tune popularity from " + popularityCsvPath + ".");
   }
 
   return csv.parseCsvFile(csvPath, function (rowValues) {
@@ -658,6 +748,8 @@ function runEvaluate(commandArgs) {
       return;
     }
   }).then(function () {
+    return loadPopularityMap(popularityCsvPath);
+  }).then(function (popularityByTuneId) {
     var groupedRows = {};
     var groupOrder = [];
     var model = modelApi.createEmptyModel();
@@ -666,6 +758,11 @@ function runEvaluate(commandArgs) {
     var holdoutRows = [];
 
     eligibleRows.forEach(function (entry) {
+      var popularityEntry = popularityByTuneId[String(entry.row.tune_id || "").trim()];
+      if (popularityEntry) {
+        entry.row.tune_popularity = String(popularityEntry.tunebooks);
+        entry.row.tunebooks = String(popularityEntry.tunebooks);
+      }
       if (!groupedRows[entry.groupKey]) {
         groupedRows[entry.groupKey] = [];
         groupOrder.push(entry.groupKey);

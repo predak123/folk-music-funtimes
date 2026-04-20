@@ -580,9 +580,9 @@ function parseNumericValue(value) {
 }
 
 function estimateRowPopularityWeight(row, tuneSettingCount) {
-  var explicit = parseNumericValue(row && (row.tune_popularity || row.setting_popularity || row.popularity));
+  var explicit = parseNumericValue(row && (row.tune_popularity || row.tunebooks || row.setting_popularity || row.popularity));
   if (explicit !== null && explicit > 0) {
-    return clamp(0.98 + (Math.log(1 + explicit) * 0.07), 0.98, 1.22);
+    return clamp(1.00 + (Math.log(1 + explicit) * 0.012), 1.00, 1.11);
   }
 
   return 1;
