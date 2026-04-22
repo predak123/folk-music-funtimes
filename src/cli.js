@@ -18,6 +18,7 @@ function usage() {
   console.log("  node src/cli.js evaluate --csv data/tunes.csv [--limit 20000] [--holdout-every 5] [--holdout-by row|tune|melody] [--types jig,reel] [--popularity-csv data/tune_popularity.csv] [--placement-first] [--onset-context-identity] [--onset-learner] [--pulse-templates]");
   console.log("  node src/cli.js predict --model artifacts/model.json --abc examples/input-no-chords.abc --meter 2/4 --mode Adorian --type polka [--write-abc output.abc] [--placement-first] [--onset-context-identity] [--onset-learner] [--pulse-templates]");
   console.log("  node src/cli.js compare --csv data/tunes.csv --name \"Kesh, The\" [--setting-id 47264] [--model artifacts/the-session-model.json] [--popularity-csv data/tune_popularity.csv] [--placement-first] [--onset-context-identity] [--onset-learner] [--pulse-templates]");
+  console.log("  node src/cli.js export-features --csv data/tunes.csv [--out artifacts/powerbi/beat_slots.csv] [--limit 50000] [--types jig,reel] [--chorded-only] [--popularity-csv data/tune_popularity.csv]");
 }
 
 function rowFromArray(headers, values) {
@@ -193,6 +194,268 @@ function decorateRowsWithPopularity(rows, popularityByTuneId) {
   });
 
   return rows;
+}
+
+function csvEscape(value) {
+  var text = value === undefined || value === null ? "" : String(value);
+  if (/[",\r\n]/.test(text)) {
+    return "\"" + text.replace(/"/g, "\"\"") + "\"";
+  }
+  return text;
+}
+
+function writeCsvRow(stream, headers, row) {
+  stream.write(headers.map(function (header) {
+    return csvEscape(row[header]);
+  }).join(",") + "\n");
+}
+
+function formatNumber(value) {
+  if (value === undefined || value === null || value === "") {
+    return "";
+  }
+
+  if (!isFinite(value)) {
+    return "";
+  }
+
+  if (Math.abs(Math.round(value) - value) < 1e-9) {
+    return String(Math.round(value));
+  }
+
+  return value.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function boolToFlag(value) {
+  return value ? "1" : "0";
+}
+
+function toSortedRelativePcs(map) {
+  return Object.keys(map || {}).sort(function (left, right) {
+    var diff = (map[right] || 0) - (map[left] || 0);
+    if (diff !== 0) {
+      return diff;
+    }
+    return parseInt(left, 10) - parseInt(right, 10);
+  }).map(function (key) {
+    return parseInt(key, 10);
+  });
+}
+
+function degreeLabelsForPcs(pcs, modeInfo) {
+  return (pcs || []).map(function (pc) {
+    return theory.degreeLabelForRelativeRoot(modeInfo, pc);
+  });
+}
+
+function joinPcs(pcs) {
+  return (pcs || []).map(function (pc) {
+    return String(pc);
+  }).join("|");
+}
+
+function joinDegreeLabels(pcs, modeInfo) {
+  return degreeLabelsForPcs(pcs, modeInfo).join("|");
+}
+
+function formatNoteWeightMap(noteWeights, modeInfo) {
+  return toSortedRelativePcs(noteWeights).map(function (pc) {
+    return theory.degreeLabelForRelativeRoot(modeInfo, pc) + ":" + formatNumber(noteWeights[pc]);
+  }).join("|");
+}
+
+function topRelativePc(noteWeights) {
+  var ordered = toSortedRelativePcs(noteWeights);
+  return ordered.length ? ordered[0] : null;
+}
+
+function placementFamilyForTune(parsedTune) {
+  var typeName = normalizeTypeName(parsedTune.type);
+
+  if (["reel", "hornpipe", "strathspey", "march"].indexOf(typeName) !== -1) {
+    return "duple-strong2";
+  }
+
+  if (["jig", "slide"].indexOf(typeName) !== -1) {
+    return "compound-duple";
+  }
+
+  if (typeName === "slip jig") {
+    return "compound-triple";
+  }
+
+  if (["polka", "barndance"].indexOf(typeName) !== -1) {
+    return "simple-duple";
+  }
+
+  if (["waltz", "mazurka", "three-two"].indexOf(typeName) !== -1) {
+    return "simple-triple";
+  }
+
+  return typeName;
+}
+
+function partRoleForSlice(parsedTune, slice) {
+  var partCount = (parsedTune.partFingerprints && parsedTune.partFingerprints.length) || 1;
+  if (partCount <= 1) {
+    return "single";
+  }
+  if (slice.partIndex === 0) {
+    return "first";
+  }
+  if (slice.partIndex === partCount - 1) {
+    return "final";
+  }
+  return "middle";
+}
+
+function phraseStageForSlice(slice) {
+  if (slice.isPickup) {
+    return "pickup";
+  }
+  if (slice.measuresFromPartEnd === 0) {
+    return "final";
+  }
+  if (slice.measuresFromPartEnd === 1) {
+    return "penultimate";
+  }
+  if (slice.measuresFromPartEnd !== null && slice.measuresFromPartEnd <= 3) {
+    return "late";
+  }
+  if ((slice.measureInPart || 0) <= 1) {
+    return "opening";
+  }
+  return "interior";
+}
+
+function harmonicFunctionForToken(token, modeInfo) {
+  var root = String(token || "").split(":")[0];
+  var modeFamily = modeInfo.modeFamily;
+
+  if (modeFamily === "major") {
+    if (["1", "6", "3"].indexOf(root) !== -1) {
+      return "tonic";
+    }
+    if (["2", "4"].indexOf(root) !== -1) {
+      return "predominant";
+    }
+    if (["5", "7"].indexOf(root) !== -1) {
+      return "dominant";
+    }
+    return "modal";
+  }
+
+  if (modeFamily === "minor" || modeFamily === "dorian") {
+    if (["1", "6"].indexOf(root) !== -1) {
+      return "tonic";
+    }
+    if (["2", "4"].indexOf(root) !== -1) {
+      return "predominant";
+    }
+    if (["3", "5", "7"].indexOf(root) !== -1) {
+      return "dominant";
+    }
+    return "modal";
+  }
+
+  if (modeFamily === "mixolydian") {
+    if (["1", "6"].indexOf(root) !== -1) {
+      return "tonic";
+    }
+    if (["2", "4"].indexOf(root) !== -1) {
+      return "predominant";
+    }
+    if (["5", "7"].indexOf(root) !== -1) {
+      return "dominant";
+    }
+    return "modal";
+  }
+
+  return "other";
+}
+
+function beatStrengthForSlice(parsedTune, slice) {
+  var meterInfo = parsedTune.meterInfo;
+
+  if (slice.isPickup || slice.beatInBar === null) {
+    return 0.9;
+  }
+
+  if (meterInfo.denominator === 8 && meterInfo.numerator % 3 === 0 && meterInfo.numerator > 3) {
+    if (slice.beatInBar === 0) {
+      return 1.4;
+    }
+
+    if (meterInfo.beatsPerBar === 2 && slice.beatInBar === 1) {
+      return 1.18;
+    }
+
+    if (meterInfo.beatsPerBar === 3) {
+      if (slice.beatInBar === 1) {
+        return 1.08;
+      }
+      if (slice.beatInBar === 2) {
+        return 1.00;
+      }
+    }
+
+    return meterInfo.beatsPerBar > 2 && slice.beatInBar === Math.floor(meterInfo.beatsPerBar / 2) ? 1.0 : 0.82;
+  }
+
+  if (meterInfo.beatsPerBar === 4) {
+    if (slice.beatInBar === 0) {
+      return 1.5;
+    }
+    if (slice.beatInBar === 2) {
+      return 1.15;
+    }
+    return 0.8;
+  }
+
+  if (meterInfo.beatsPerBar === 3) {
+    return slice.beatInBar === 0 ? 1.45 : 0.8;
+  }
+
+  if (meterInfo.beatsPerBar === 2) {
+    return slice.beatInBar === 0 ? 1.45 : 1.0;
+  }
+
+  return slice.beatInBar === 0 ? 1.35 : 0.9;
+}
+
+function pulseIndexForSlice(parsedTune, slice) {
+  var family = placementFamilyForTune(parsedTune);
+
+  if (slice.beatInBar === null) {
+    return "";
+  }
+
+  if (family === "duple-strong2" && parsedTune.meterInfo.raw === "4/4") {
+    return String(Math.floor(slice.beatInBar / 2));
+  }
+
+  return String(slice.beatInBar);
+}
+
+function slotProfileValue(slotProfiles, slotIndex, key, modeInfo) {
+  var slotProfile = (slotProfiles || [])[slotIndex];
+  var value;
+
+  if (!slotProfile) {
+    return "";
+  }
+
+  value = slotProfile[key];
+  if (key === "startingPcs") {
+    return joinDegreeLabels(value, modeInfo);
+  }
+  if (key === "noteWeights") {
+    return formatNoteWeightMap(value, modeInfo);
+  }
+  if (key === "label") {
+    return value || "";
+  }
+  return value;
 }
 
 function createStatsBucket() {
@@ -895,6 +1158,290 @@ function runPredict(commandArgs) {
   }
 }
 
+function runExportFeatures(commandArgs) {
+  var csvPath = commandArgs.csv;
+  var outPath = commandArgs.out || path.join("artifacts", "powerbi", "beat_slots.csv");
+  var limit = commandArgs.limit ? parseInt(commandArgs.limit, 10) : null;
+  var typeFilter = parseTypeFilter(commandArgs.types);
+  var chordedOnly = !!commandArgs["chorded-only"];
+  var popularityCsvPath = resolvePopularityCsvPath(commandArgs, csvPath);
+  var csvHeaders = null;
+  var processed = 0;
+  var exportedTunes = 0;
+  var exportedRows = 0;
+  var skipped = 0;
+  var outputHeaders = [
+    "source_row_index",
+    "tune_id",
+    "setting_id",
+    "name",
+    "date",
+    "username",
+    "composer",
+    "tunebooks",
+    "type",
+    "type_normalized",
+    "placement_family",
+    "meter",
+    "meter_numerator",
+    "meter_denominator",
+    "beats_per_bar",
+    "beat_length",
+    "bar_length",
+    "mode",
+    "mode_family",
+    "tonic_name",
+    "tonic_pc",
+    "has_inline_chords",
+    "part_count",
+    "measure_count",
+    "pickup_duration",
+    "beat_slice_index",
+    "beat_number",
+    "raw_bar_index",
+    "bar_index",
+    "measure_number",
+    "measure_in_part",
+    "part_index",
+    "part_pass",
+    "part_role",
+    "part_length",
+    "measures_from_part_end",
+    "phrase_stage",
+    "ending_number",
+    "is_pickup",
+    "is_pickup_complement",
+    "is_cadence_measure",
+    "beat_in_bar",
+    "pulse_index_in_bar",
+    "beat_slot_label",
+    "beat_strength",
+    "strong_beat_flag",
+    "start",
+    "end",
+    "duration",
+    "anchor_index",
+    "measure_signature",
+    "note_relative_pcs_ranked",
+    "note_degree_labels_ranked",
+    "note_weight_map",
+    "top_note_relative_pc",
+    "top_note_degree_label",
+    "onset_degree_labels",
+    "middle_degree_labels",
+    "late_degree_labels",
+    "slot_0_label",
+    "slot_0_start_degree_labels",
+    "slot_0_note_weight_map",
+    "slot_1_label",
+    "slot_1_start_degree_labels",
+    "slot_1_note_weight_map",
+    "slot_2_label",
+    "slot_2_start_degree_labels",
+    "slot_2_note_weight_map",
+    "chord_raw",
+    "has_chord",
+    "has_normalized_chord",
+    "chord_root_name",
+    "chord_quality",
+    "chord_degree_label",
+    "chord_relative_root",
+    "chord_token",
+    "chord_display",
+    "harmonic_function",
+    "chord_changed_from_previous",
+    "chord_event_index"
+  ];
+
+  if (!csvPath) {
+    throw new Error("export-features requires --csv");
+  }
+
+  console.log("Exporting beat-slot features from " + csvPath + " to " + outPath + ".");
+  if (typeFilter) {
+    console.log("Filtering tune types to: " + Object.keys(typeFilter).sort().join(", "));
+  }
+  if (chordedOnly) {
+    console.log("Including chorded settings only.");
+  }
+  if (popularityCsvPath) {
+    console.log("Using tune popularity from " + popularityCsvPath + ".");
+  }
+
+  return loadPopularityMap(popularityCsvPath).then(function (popularityByTuneId) {
+    return new Promise(function (resolve, reject) {
+      io.ensureParentDir(outPath);
+      var stream = fs.createWriteStream(outPath, {
+        encoding: "utf8"
+      });
+
+      stream.on("error", reject);
+      stream.write(outputHeaders.join(",") + "\n");
+
+      csv.parseCsvFile(csvPath, function (rowValues) {
+        var row;
+        var parsedTune;
+        var previousToken;
+        var chordEventIndex;
+        var hasInlineChords;
+
+        if (!csvHeaders) {
+          csvHeaders = rowValues;
+          return;
+        }
+
+        if (limit && processed >= limit) {
+          return;
+        }
+
+        processed += 1;
+
+        try {
+          row = rowFromArray(csvHeaders, rowValues);
+          if (!matchesTypeFilter(row, typeFilter)) {
+            return;
+          }
+
+          hasInlineChords = row.abc && row.abc.indexOf("\"") !== -1;
+          if (chordedOnly && !hasInlineChords) {
+            return;
+          }
+
+          decorateRowsWithPopularity([row], popularityByTuneId);
+          parsedTune = abcParser.parseAbcTune({
+            abc: row.abc,
+            meter: row.meter,
+            mode: row.mode,
+            type: row.type
+          });
+          previousToken = null;
+          chordEventIndex = 0;
+
+          parsedTune.beatSlices.forEach(function (slice, sliceIndex) {
+            var normalizedChord = slice.chord ? theory.normalizeChord(slice.chord.raw, parsedTune.modeInfo) : null;
+            var chordChanged = "";
+            var rankedPcs = toSortedRelativePcs(slice.noteWeights);
+            var topPc = topRelativePc(slice.noteWeights);
+            var beatStrength = beatStrengthForSlice(parsedTune, slice);
+
+            if (normalizedChord) {
+              chordChanged = previousToken === null || previousToken !== normalizedChord.token;
+              if (chordChanged) {
+                chordEventIndex += 1;
+              }
+              previousToken = normalizedChord.token;
+            }
+
+            writeCsvRow(stream, outputHeaders, {
+              source_row_index: processed,
+              tune_id: row.tune_id,
+              setting_id: row.setting_id,
+              name: row.name,
+              date: row.date,
+              username: row.username,
+              composer: row.composer,
+              tunebooks: row.tunebooks || row.tune_popularity || "",
+              type: row.type,
+              type_normalized: normalizeTypeName(row.type),
+              placement_family: placementFamilyForTune(parsedTune),
+              meter: parsedTune.meterInfo.raw,
+              meter_numerator: parsedTune.meterInfo.numerator,
+              meter_denominator: parsedTune.meterInfo.denominator,
+              beats_per_bar: parsedTune.meterInfo.beatsPerBar,
+              beat_length: formatNumber(parsedTune.meterInfo.beatLength),
+              bar_length: formatNumber(parsedTune.meterInfo.barLength),
+              mode: row.mode,
+              mode_family: parsedTune.modeInfo.modeFamily,
+              tonic_name: parsedTune.modeInfo.tonicName,
+              tonic_pc: parsedTune.modeInfo.tonicPc,
+              has_inline_chords: boolToFlag(hasInlineChords),
+              part_count: (parsedTune.partFingerprints && parsedTune.partFingerprints.length) || 1,
+              measure_count: parsedTune.measures.length,
+              pickup_duration: formatNumber(parsedTune.pickupDuration),
+              beat_slice_index: sliceIndex,
+              beat_number: slice.beatNumber,
+              raw_bar_index: slice.rawBarIndex,
+              bar_index: slice.barIndex,
+              measure_number: slice.measureNumber,
+              measure_in_part: slice.measureInPart,
+              part_index: slice.partIndex,
+              part_pass: slice.partPass,
+              part_role: partRoleForSlice(parsedTune, slice),
+              part_length: slice.partLength,
+              measures_from_part_end: slice.measuresFromPartEnd,
+              phrase_stage: phraseStageForSlice(slice),
+              ending_number: slice.endingNumber,
+              is_pickup: boolToFlag(slice.isPickup),
+              is_pickup_complement: boolToFlag(slice.isPickupComplement),
+              is_cadence_measure: boolToFlag(slice.isCadenceMeasure),
+              beat_in_bar: slice.beatInBar,
+              pulse_index_in_bar: pulseIndexForSlice(parsedTune, slice),
+              beat_slot_label: slice.isPickup ? "pickup" : (slice.beatInBar === null ? "" : String(slice.beatInBar + 1)),
+              beat_strength: formatNumber(beatStrength),
+              strong_beat_flag: boolToFlag(beatStrength >= 1.1),
+              start: formatNumber(slice.start),
+              end: formatNumber(slice.end),
+              duration: formatNumber(slice.end - slice.start),
+              anchor_index: slice.anchorIndex,
+              measure_signature: slice.measureSignature,
+              note_relative_pcs_ranked: joinPcs(rankedPcs),
+              note_degree_labels_ranked: joinDegreeLabels(rankedPcs, parsedTune.modeInfo),
+              note_weight_map: formatNoteWeightMap(slice.noteWeights, parsedTune.modeInfo),
+              top_note_relative_pc: topPc === null ? "" : topPc,
+              top_note_degree_label: topPc === null ? "" : theory.degreeLabelForRelativeRoot(parsedTune.modeInfo, topPc),
+              onset_degree_labels: joinDegreeLabels((slice.subPulsePcs && slice.subPulsePcs.onset) || [], parsedTune.modeInfo),
+              middle_degree_labels: joinDegreeLabels((slice.subPulsePcs && slice.subPulsePcs.middle) || [], parsedTune.modeInfo),
+              late_degree_labels: joinDegreeLabels((slice.subPulsePcs && slice.subPulsePcs.third) || [], parsedTune.modeInfo),
+              slot_0_label: slotProfileValue(slice.slotProfiles, 0, "label", parsedTune.modeInfo),
+              slot_0_start_degree_labels: slotProfileValue(slice.slotProfiles, 0, "startingPcs", parsedTune.modeInfo),
+              slot_0_note_weight_map: slotProfileValue(slice.slotProfiles, 0, "noteWeights", parsedTune.modeInfo),
+              slot_1_label: slotProfileValue(slice.slotProfiles, 1, "label", parsedTune.modeInfo),
+              slot_1_start_degree_labels: slotProfileValue(slice.slotProfiles, 1, "startingPcs", parsedTune.modeInfo),
+              slot_1_note_weight_map: slotProfileValue(slice.slotProfiles, 1, "noteWeights", parsedTune.modeInfo),
+              slot_2_label: slotProfileValue(slice.slotProfiles, 2, "label", parsedTune.modeInfo),
+              slot_2_start_degree_labels: slotProfileValue(slice.slotProfiles, 2, "startingPcs", parsedTune.modeInfo),
+              slot_2_note_weight_map: slotProfileValue(slice.slotProfiles, 2, "noteWeights", parsedTune.modeInfo),
+              chord_raw: slice.chord ? slice.chord.raw : "",
+              has_chord: boolToFlag(!!slice.chord),
+              has_normalized_chord: boolToFlag(!!normalizedChord),
+              chord_root_name: normalizedChord ? normalizedChord.rootName : "",
+              chord_quality: normalizedChord ? normalizedChord.quality : "",
+              chord_degree_label: normalizedChord ? normalizedChord.degreeLabel : "",
+              chord_relative_root: normalizedChord ? normalizedChord.relativeRoot : "",
+              chord_token: normalizedChord ? normalizedChord.token : "",
+              chord_display: normalizedChord ? theory.chordTokenToDisplayName(normalizedChord.token, parsedTune.modeInfo) : "",
+              harmonic_function: normalizedChord ? harmonicFunctionForToken(normalizedChord.token, parsedTune.modeInfo) : "",
+              chord_changed_from_previous: normalizedChord ? boolToFlag(chordChanged) : "",
+              chord_event_index: normalizedChord ? chordEventIndex : ""
+            });
+            exportedRows += 1;
+          });
+
+          exportedTunes += 1;
+          if (processed % 2000 === 0) {
+            console.log("Processed " + processed + " rows. Exported " + exportedTunes + " tunes and " + exportedRows + " beat slots. Skipped " + skipped + ".");
+          }
+        } catch (error) {
+          skipped += 1;
+        }
+      }).then(function () {
+        stream.end(function () {
+          console.log("Feature export complete.");
+          console.log("Processed rows: " + processed);
+          console.log("Exported tunes: " + exportedTunes);
+          console.log("Exported beat slots: " + exportedRows);
+          console.log("Skipped rows: " + skipped);
+          console.log("Output: " + outPath);
+          resolve();
+        });
+      }, function (error) {
+        stream.destroy();
+        reject(error);
+      });
+    });
+  });
+}
+
 function main() {
   var parsed = args.parseArgs(process.argv.slice(2));
   var command = parsed._[0];
@@ -913,6 +1460,8 @@ function main() {
     action = runTrain(parsed);
   } else if (command === "evaluate") {
     action = runEvaluate(parsed);
+  } else if (command === "export-features") {
+    action = runExportFeatures(parsed);
   } else if (command === "predict") {
     action = Promise.resolve().then(function () {
       runPredict(parsed);

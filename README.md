@@ -121,6 +121,12 @@ Predict chords for a tune body:
 node src/cli.js predict --model artifacts/the-session-model.json --abc examples/input-no-chords.abc --meter 2/4 --mode Adorian --type polka --write-abc artifacts/input-with-chords.abc
 ```
 
+Export a Power BI-friendly beat-slot table:
+
+```powershell
+node src/cli.js export-features --csv data/tunes.csv --popularity-csv data/tune_popularity.csv --out artifacts/powerbi/chorded_beat_slots.csv --chorded-only
+```
+
 Run tests:
 
 ```powershell
