@@ -129,6 +129,11 @@ node src/cli.js export-features --csv data/tunes.csv --popularity-csv data/tune_
 
 `--standard-only` excludes structural outliers such as suite-like multi-section settings, overlong measures, and settings with inline structural directives. The export also includes tune-level structural flags so raw and cleaned exports can be compared in Power BI.
 
+The export now separates musician-facing bar positions from parser pulses:
+- `beat_in_bar` / `beat_end_in_bar` / `beat_span_in_bar` use the written meter count, so a `6/8` jig pulse lands on `1-3` or `4-6`
+- `metrical_beat_in_bar` keeps the compound-meter pulse count (`1-2` in `6/8`)
+- `pulse_index_in_bar` keeps the broader placement-family pulse grouping used by the model
+
 Run tests:
 
 ```powershell

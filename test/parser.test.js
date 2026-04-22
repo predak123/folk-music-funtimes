@@ -87,6 +87,12 @@ function run() {
     mode: "Gmajor",
     type: "reel"
   });
+  var repeatedSections = abc.parseAbcTune({
+    abc: "AF|:\"D\"D2 D3/2E/ FDFA|d3/2c/ BA \"G\"B2 AB|\"D\"dcBA \"G\"BdDE|\"Bm7\"FBAF \"A\"E2 AF|\"D\"D2 D3/2E/ FDFA|d3/2c/ BA \"G\"B2 AB|\"D\"dcBA \"G\"BdFE||1 \"D\"F2 D3/2D/ D2 AF:|2 \"D\"F2 D3/2D/ D2 FA|||:\"D\"d2 d2 d2 cA|\"G\"B2 BA G2 Bc|\"D\"d2 d2 d2 cA|\"A\"B2 AF E2 FA|\"D\"d2 d2 d2 cA|\"G\"B2 BA G2 Bc|\"D\"d2 d2 d2 cB||1 \"A\"A2 AA A2 FA:|2 \"A\"A2 AA A3/2B/c||",
+    meter: "4/4",
+    mode: "Dmajor",
+    type: "march"
+  });
 
   assert.strictEqual(withChords.beatSlices[0].slotProfiles.length, 2);
   assert.ok(withChords.beatSlices[0].slotProfiles[0].noteWeights);
@@ -99,6 +105,10 @@ function run() {
   assert.strictEqual(impliedParts.partFingerprints.length, 2);
   assert.strictEqual(impliedParts.partFingerprints[0].measureSignatures.length, 8);
   assert.strictEqual(impliedParts.partFingerprints[1].measureSignatures.length, 8);
+  assert.strictEqual(repeatedSections.partFingerprints.length, 2);
+  assert.deepStrictEqual(repeatedSections.partFingerprints.map(function (partFingerprint) {
+    return partFingerprint.measureSignatures.length;
+  }), [8, 8]);
 
   var pickupMeasure = pickupComplement.measures[0];
   var lastMeasure = pickupComplement.measures[pickupComplement.measures.length - 1];

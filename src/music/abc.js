@@ -209,19 +209,23 @@ function consumeBarline(text, index) {
   };
 }
 
-function pushUniqueBoundary(boundaries, offset, endingNumber) {
+function pushUniqueBoundary(boundaries, offset, endingNumber, raw) {
   var last = boundaries.length ? boundaries[boundaries.length - 1] : null;
 
   if (last && Math.abs(last.offset - offset) <= EPSILON) {
     if (endingNumber !== null && endingNumber !== undefined) {
       last.endingNumber = endingNumber;
     }
+    if (raw) {
+      last.raw = (last.raw || "") + raw;
+    }
     return;
   }
 
   boundaries.push({
     offset: offset,
-    endingNumber: endingNumber === undefined ? null : endingNumber
+    endingNumber: endingNumber === undefined ? null : endingNumber,
+    raw: raw || ""
   });
 }
 
@@ -267,6 +271,16 @@ function choosePartLength(fullMeasureCount) {
   return Math.max(1, fullMeasureCount || 1);
 }
 
+function isStrongSectionBoundary(rawText) {
+  var text = String(rawText || "");
+
+  if (!text) {
+    return false;
+  }
+
+  return text.indexOf("||") !== -1 || text.indexOf("[|") !== -1;
+}
+
 function blocksAreVariants(leftBlock, rightBlock) {
   var compareCount = Math.min(leftBlock.length, rightBlock.length);
   if (compareCount < 4) {
@@ -307,8 +321,27 @@ function assignPartStructure(measures, pickupCount) {
     };
   }
 
-  for (i = 0; i < fullMeasures.length; i += partLength) {
-    blocks.push(fullMeasures.slice(i, i + partLength));
+  if (fullMeasures.some(function (measure, measureIndex) {
+    return measureIndex > 0 && measure.startsSection;
+  })) {
+    var currentBlock = [];
+
+    fullMeasures.forEach(function (measure, measureIndex) {
+      if (measureIndex > 0 && measure.startsSection && currentBlock.length) {
+        blocks.push(currentBlock);
+        currentBlock = [];
+      }
+
+      currentBlock.push(measure);
+    });
+
+    if (currentBlock.length) {
+      blocks.push(currentBlock);
+    }
+  } else {
+    for (i = 0; i < fullMeasures.length; i += partLength) {
+      blocks.push(fullMeasures.slice(i, i + partLength));
+    }
   }
 
   blocks.forEach(function (block) {
@@ -410,6 +443,7 @@ function assignPartTailMetadata(measures, pickupDuration, barLength) {
 function buildMeasures(parsedTune, barEvents) {
   var boundaries = [0];
   var endingByStart = {};
+  var sectionBreakByStart = {};
   var i;
 
   for (i = 0; i < barEvents.length; i += 1) {
@@ -420,6 +454,10 @@ function buildMeasures(parsedTune, barEvents) {
 
     if (barEvent.endingNumber !== null && barEvent.endingNumber !== undefined) {
       endingByStart[quantize(barEvent.offset)] = barEvent.endingNumber;
+    }
+
+    if (isStrongSectionBoundary(barEvent.raw) && (barEvent.endingNumber === null || barEvent.endingNumber === undefined)) {
+      sectionBreakByStart[quantize(barEvent.offset)] = true;
     }
   }
 
@@ -449,6 +487,7 @@ function buildMeasures(parsedTune, barEvents) {
       end: end,
       duration: end - start,
       endingNumber: endingByStart[quantize(start)] || null,
+      startsSection: !!sectionBreakByStart[quantize(start)],
       signature: buildMeasureSignature(parsedTune.noteGroups, start, end)
     });
   }
@@ -947,7 +986,7 @@ function parseAbcTune(options) {
 
     if (barlineInfo) {
       accidentalMemory = {};
-      pushUniqueBoundary(barEvents, offset, barlineInfo.endingNumber !== null ? barlineInfo.endingNumber : pendingEndingNumber);
+      pushUniqueBoundary(barEvents, offset, barlineInfo.endingNumber !== null ? barlineInfo.endingNumber : pendingEndingNumber, barlineInfo.raw);
       pendingEndingNumber = null;
       index = barlineInfo.endIndex;
       continue;

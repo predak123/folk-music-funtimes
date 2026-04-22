@@ -528,7 +528,8 @@ function buildStructureSummary(row, parsedTune) {
     hasExcessivePartCount: flags.indexOf("many-parts") !== -1,
     hasShortPart: flags.indexOf("short-part") !== -1,
     structuralFlags: flags,
-    isStructuralOutlier: flags.length > 0
+    hasComplexForm: flags.indexOf("many-parts") !== -1 || flags.indexOf("short-part") !== -1,
+    isStructuralOutlier: hasInlineStructuralDirectives(row.abc) || hasOutOfRangeBeatSlots || hasOverlongMeasure
   };
 }
 
@@ -646,6 +647,72 @@ function exportPulseIndexInBar(parsedTune, slice) {
   }
 
   return rawValue;
+}
+
+function writtenUnitsPerPulse(parsedTune) {
+  return Math.max(1, Math.round(parsedTune.meterInfo.beatLength * parsedTune.meterInfo.denominator));
+}
+
+function exportMetricalBeatInBar(slice) {
+  if (!slice) {
+    return 0;
+  }
+
+  if (slice.isPickup) {
+    return 0;
+  }
+
+  return slice.beatInBar === null || slice.beatInBar === undefined ? "" : (slice.beatInBar + 1);
+}
+
+function exportBeatStartInBar(parsedTune, slice) {
+  var metricalBeat;
+  var unitsPerPulse;
+
+  if (!slice) {
+    return 0;
+  }
+
+  if (slice.isPickup) {
+    return 0;
+  }
+
+  metricalBeat = exportMetricalBeatInBar(slice);
+  if (metricalBeat === "") {
+    return "";
+  }
+
+  unitsPerPulse = writtenUnitsPerPulse(parsedTune);
+  return ((metricalBeat - 1) * unitsPerPulse) + 1;
+}
+
+function exportBeatEndInBar(parsedTune, slice) {
+  var startUnit = exportBeatStartInBar(parsedTune, slice);
+
+  if (startUnit === "" || startUnit === 0) {
+    return startUnit;
+  }
+
+  return startUnit + writtenUnitsPerPulse(parsedTune) - 1;
+}
+
+function exportBeatSpanInBar(parsedTune, slice) {
+  var startUnit = exportBeatStartInBar(parsedTune, slice);
+  var endUnit = exportBeatEndInBar(parsedTune, slice);
+
+  if (startUnit === "" || endUnit === "") {
+    return "";
+  }
+
+  if (startUnit === 0 && endUnit === 0) {
+    return "pickup";
+  }
+
+  if (startUnit === endUnit) {
+    return String(startUnit);
+  }
+
+  return String(startUnit) + "-" + String(endUnit);
 }
 
 function createStatsBucket() {
@@ -1377,6 +1444,7 @@ function runExportFeatures(commandArgs) {
     "meter_numerator",
     "meter_denominator",
     "beats_per_bar",
+    "metrical_beats_per_bar",
     "beat_length",
     "bar_length",
     "mode",
@@ -1389,6 +1457,7 @@ function runExportFeatures(commandArgs) {
     "has_overlong_measure",
     "has_short_part",
     "has_excessive_part_count",
+    "has_complex_form",
     "is_structural_outlier",
     "structural_flags",
     "part_count",
@@ -1414,6 +1483,9 @@ function runExportFeatures(commandArgs) {
     "is_pickup_complement",
     "is_cadence_measure",
     "beat_in_bar",
+    "metrical_beat_in_bar",
+    "beat_end_in_bar",
+    "beat_span_in_bar",
     "pulse_index_in_bar",
     "beat_slot_label",
     "beat_strength",
@@ -1533,7 +1605,10 @@ function runExportFeatures(commandArgs) {
             var rankedPcs = toSortedRelativePcs(slice.noteWeights);
             var topPc = topRelativePc(slice.noteWeights);
             var beatStrength = beatStrengthForSlice(parsedTune, slice);
-            var exportedBeatInBar = exportBeatInBar(slice);
+            var exportedMetricalBeatInBar = exportMetricalBeatInBar(slice);
+            var exportedBeatInBar = exportBeatStartInBar(parsedTune, slice);
+            var exportedBeatEndInBar = exportBeatEndInBar(parsedTune, slice);
+            var exportedBeatSpanInBar = exportBeatSpanInBar(parsedTune, slice);
             var exportedPulseIndexInBar = exportPulseIndexInBar(parsedTune, slice);
 
             if (normalizedChord) {
@@ -1559,7 +1634,8 @@ function runExportFeatures(commandArgs) {
               meter: parsedTune.meterInfo.raw,
               meter_numerator: parsedTune.meterInfo.numerator,
               meter_denominator: parsedTune.meterInfo.denominator,
-              beats_per_bar: parsedTune.meterInfo.beatsPerBar,
+              beats_per_bar: parsedTune.meterInfo.numerator,
+              metrical_beats_per_bar: parsedTune.meterInfo.beatsPerBar,
               beat_length: formatNumber(parsedTune.meterInfo.beatLength),
               bar_length: formatNumber(parsedTune.meterInfo.barLength),
               mode: row.mode,
@@ -1572,6 +1648,7 @@ function runExportFeatures(commandArgs) {
               has_overlong_measure: boolToFlag(structureSummary.hasOverlongMeasure),
               has_short_part: boolToFlag(structureSummary.hasShortPart),
               has_excessive_part_count: boolToFlag(structureSummary.hasExcessivePartCount),
+              has_complex_form: boolToFlag(structureSummary.hasComplexForm),
               is_structural_outlier: boolToFlag(structureSummary.isStructuralOutlier),
               structural_flags: structureSummary.structuralFlags.join("|"),
               part_count: (parsedTune.partFingerprints && parsedTune.partFingerprints.length) || 1,
@@ -1599,8 +1676,11 @@ function runExportFeatures(commandArgs) {
               is_pickup_complement: boolToFlag(slice.isPickupComplement),
               is_cadence_measure: boolToFlag(slice.isCadenceMeasure),
               beat_in_bar: exportedBeatInBar,
+              metrical_beat_in_bar: exportedMetricalBeatInBar,
+              beat_end_in_bar: exportedBeatEndInBar,
+              beat_span_in_bar: exportedBeatSpanInBar,
               pulse_index_in_bar: exportedPulseIndexInBar,
-              beat_slot_label: slice.isPickup ? "pickup" : (exportedBeatInBar === "" ? "" : String(exportedBeatInBar)),
+              beat_slot_label: slice.isPickup ? "pickup" : exportedBeatSpanInBar,
               beat_strength: formatNumber(beatStrength),
               strong_beat_flag: boolToFlag(beatStrength >= 1.1),
               start: formatNumber(slice.start),
