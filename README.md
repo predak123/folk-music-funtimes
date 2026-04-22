@@ -124,8 +124,10 @@ node src/cli.js predict --model artifacts/the-session-model.json --abc examples/
 Export a Power BI-friendly beat-slot table:
 
 ```powershell
-node src/cli.js export-features --csv data/tunes.csv --popularity-csv data/tune_popularity.csv --out artifacts/powerbi/chorded_beat_slots.csv --chorded-only
+node src/cli.js export-features --csv data/tunes.csv --popularity-csv data/tune_popularity.csv --out artifacts/powerbi/chorded_beat_slots.csv --chorded-only --standard-only
 ```
+
+`--standard-only` excludes structural outliers such as suite-like multi-section settings, overlong measures, and settings with inline structural directives. The export also includes tune-level structural flags so raw and cleaned exports can be compared in Power BI.
 
 Run tests:
 

@@ -18,7 +18,7 @@ function usage() {
   console.log("  node src/cli.js evaluate --csv data/tunes.csv [--limit 20000] [--holdout-every 5] [--holdout-by row|tune|melody] [--types jig,reel] [--popularity-csv data/tune_popularity.csv] [--placement-first] [--onset-context-identity] [--onset-learner] [--pulse-templates]");
   console.log("  node src/cli.js predict --model artifacts/model.json --abc examples/input-no-chords.abc --meter 2/4 --mode Adorian --type polka [--write-abc output.abc] [--placement-first] [--onset-context-identity] [--onset-learner] [--pulse-templates]");
   console.log("  node src/cli.js compare --csv data/tunes.csv --name \"Kesh, The\" [--setting-id 47264] [--model artifacts/the-session-model.json] [--popularity-csv data/tune_popularity.csv] [--placement-first] [--onset-context-identity] [--onset-learner] [--pulse-templates]");
-  console.log("  node src/cli.js export-features --csv data/tunes.csv [--out artifacts/powerbi/beat_slots.csv] [--limit 50000] [--types jig,reel] [--chorded-only] [--popularity-csv data/tune_popularity.csv]");
+  console.log("  node src/cli.js export-features --csv data/tunes.csv [--out artifacts/powerbi/beat_slots.csv] [--limit 50000] [--types jig,reel] [--chorded-only] [--popularity-csv data/tune_popularity.csv] [--standard-only]");
 }
 
 function rowFromArray(headers, values) {
@@ -456,6 +456,196 @@ function slotProfileValue(slotProfiles, slotIndex, key, modeInfo) {
     return value || "";
   }
   return value;
+}
+
+function collectPartLengths(parsedTune) {
+  var lengthsByPart = {};
+
+  (parsedTune.measures || []).forEach(function (measure) {
+    if (!measure || measure.isPickup) {
+      return;
+    }
+
+    lengthsByPart[measure.partIndex] = Math.max(lengthsByPart[measure.partIndex] || 0, (measure.measureInPart || 0) + 1);
+  });
+
+  return Object.keys(lengthsByPart).sort(function (left, right) {
+    return parseInt(left, 10) - parseInt(right, 10);
+  }).map(function (partIndex) {
+    return lengthsByPart[partIndex];
+  });
+}
+
+function firstPartLength(parsedTune) {
+  var partLengths = collectPartLengths(parsedTune);
+  return partLengths.length ? partLengths[0] : 0;
+}
+
+function hasInlineStructuralDirectives(abcText) {
+  return /\[(?:K|L|M|P|Q|V):/i.test(String(abcText || ""));
+}
+
+function buildStructureSummary(row, parsedTune) {
+  var partLengths = collectPartLengths(parsedTune);
+  var shortestPartLength = partLengths.length ? Math.min.apply(null, partLengths) : 0;
+  var longestPartLength = partLengths.length ? Math.max.apply(null, partLengths) : 0;
+  var hasOutOfRangeBeatSlots = (parsedTune.beatSlices || []).some(function (slice) {
+    return !slice.isPickup &&
+      slice.beatInBar !== null &&
+      slice.beatInBar !== undefined &&
+      slice.beatInBar >= parsedTune.meterInfo.beatsPerBar;
+  });
+  var hasOverlongMeasure = (parsedTune.measures || []).some(function (measure) {
+    return !measure.isPickup && measure.duration > parsedTune.meterInfo.barLength + 1e-6;
+  });
+  var flags = [];
+
+  if (hasInlineStructuralDirectives(row.abc)) {
+    flags.push("inline-structure");
+  }
+  if (hasOutOfRangeBeatSlots) {
+    flags.push("out-of-range-beat-slot");
+  }
+  if (hasOverlongMeasure) {
+    flags.push("overlong-measure");
+  }
+  if (partLengths.length > 5) {
+    flags.push("many-parts");
+  }
+  if (partLengths.some(function (length) {
+    return length > 0 && length < 4;
+  })) {
+    flags.push("short-part");
+  }
+
+  return {
+    partLengths: partLengths,
+    shortestPartLength: shortestPartLength,
+    longestPartLength: longestPartLength,
+    hasInlineStructuralDirectives: flags.indexOf("inline-structure") !== -1,
+    hasOutOfRangeBeatSlots: hasOutOfRangeBeatSlots,
+    hasOverlongMeasure: hasOverlongMeasure,
+    hasExcessivePartCount: flags.indexOf("many-parts") !== -1,
+    hasShortPart: flags.indexOf("short-part") !== -1,
+    structuralFlags: flags,
+    isStructuralOutlier: flags.length > 0
+  };
+}
+
+function shouldIncludeExportRow(commandArgs, structureSummary) {
+  if (!commandArgs["standard-only"]) {
+    return true;
+  }
+
+  return !structureSummary.isStructuralOutlier;
+}
+
+function exportBarIndex(slice) {
+  if (!slice || slice.isPickup) {
+    return 0;
+  }
+
+  return (slice.barIndex || 0) + 1;
+}
+
+function exportMeasureInPart(parsedTune, slice) {
+  if (!slice) {
+    return 0;
+  }
+
+  if (slice.isPickup) {
+    return 0;
+  }
+
+  return (slice.measureInPart || 0) + 1;
+}
+
+function exportPartIndex(slice) {
+  if (!slice) {
+    return 1;
+  }
+
+  if (slice.isPickup) {
+    return 1;
+  }
+
+  return (slice.partIndex || 0) + 1;
+}
+
+function exportPartPass(slice) {
+  if (!slice) {
+    return 1;
+  }
+
+  if (slice.isPickup) {
+    return 1;
+  }
+
+  return slice.partPass || 1;
+}
+
+function exportPartLength(parsedTune, slice) {
+  if (!slice) {
+    return firstPartLength(parsedTune);
+  }
+
+  if (slice.isPickup) {
+    return firstPartLength(parsedTune);
+  }
+
+  return slice.partLength || firstPartLength(parsedTune);
+}
+
+function exportMeasuresFromPartEnd(parsedTune, slice) {
+  var partLength;
+
+  if (!slice) {
+    return "";
+  }
+
+  if (slice.isPickup) {
+    partLength = exportPartLength(parsedTune, slice);
+    return partLength || "";
+  }
+
+  return slice.measuresFromPartEnd === null || slice.measuresFromPartEnd === undefined ? "" : slice.measuresFromPartEnd;
+}
+
+function exportBeatInBar(slice) {
+  if (!slice) {
+    return 0;
+  }
+
+  if (slice.isPickup) {
+    return 0;
+  }
+
+  return slice.beatInBar === null || slice.beatInBar === undefined ? "" : (slice.beatInBar + 1);
+}
+
+function exportPulseIndexInBar(parsedTune, slice) {
+  var rawValue;
+  var numericValue;
+
+  if (!slice) {
+    return 0;
+  }
+
+  if (slice.isPickup) {
+    return 0;
+  }
+
+  rawValue = pulseIndexForSlice(parsedTune, slice);
+  if (rawValue === "") {
+    return "";
+  }
+
+  numericValue = parseInt(rawValue, 10);
+  if (isFinite(numericValue)) {
+    return numericValue + 1;
+  }
+
+  return rawValue;
 }
 
 function createStatsBucket() {
@@ -1164,6 +1354,7 @@ function runExportFeatures(commandArgs) {
   var limit = commandArgs.limit ? parseInt(commandArgs.limit, 10) : null;
   var typeFilter = parseTypeFilter(commandArgs.types);
   var chordedOnly = !!commandArgs["chorded-only"];
+  var standardOnly = !!commandArgs["standard-only"];
   var popularityCsvPath = resolvePopularityCsvPath(commandArgs, csvPath);
   var csvHeaders = null;
   var processed = 0;
@@ -1193,9 +1384,19 @@ function runExportFeatures(commandArgs) {
     "tonic_name",
     "tonic_pc",
     "has_inline_chords",
+    "has_inline_structural_directives",
+    "has_out_of_range_beat_slots",
+    "has_overlong_measure",
+    "has_short_part",
+    "has_excessive_part_count",
+    "is_structural_outlier",
+    "structural_flags",
     "part_count",
     "measure_count",
     "pickup_duration",
+    "shortest_part_length",
+    "longest_part_length",
+    "part_length_set",
     "beat_slice_index",
     "beat_number",
     "raw_bar_index",
@@ -1264,6 +1465,9 @@ function runExportFeatures(commandArgs) {
   if (chordedOnly) {
     console.log("Including chorded settings only.");
   }
+  if (standardOnly) {
+    console.log("Excluding structural outliers for a cleaner analysis export.");
+  }
   if (popularityCsvPath) {
     console.log("Using tune popularity from " + popularityCsvPath + ".");
   }
@@ -1281,6 +1485,7 @@ function runExportFeatures(commandArgs) {
       csv.parseCsvFile(csvPath, function (rowValues) {
         var row;
         var parsedTune;
+        var structureSummary;
         var previousToken;
         var chordEventIndex;
         var hasInlineChords;
@@ -1314,6 +1519,11 @@ function runExportFeatures(commandArgs) {
             mode: row.mode,
             type: row.type
           });
+          structureSummary = buildStructureSummary(row, parsedTune);
+          if (!shouldIncludeExportRow(commandArgs, structureSummary)) {
+            skipped += 1;
+            return;
+          }
           previousToken = null;
           chordEventIndex = 0;
 
@@ -1323,6 +1533,8 @@ function runExportFeatures(commandArgs) {
             var rankedPcs = toSortedRelativePcs(slice.noteWeights);
             var topPc = topRelativePc(slice.noteWeights);
             var beatStrength = beatStrengthForSlice(parsedTune, slice);
+            var exportedBeatInBar = exportBeatInBar(slice);
+            var exportedPulseIndexInBar = exportPulseIndexInBar(parsedTune, slice);
 
             if (normalizedChord) {
               chordChanged = previousToken === null || previousToken !== normalizedChord.token;
@@ -1355,28 +1567,40 @@ function runExportFeatures(commandArgs) {
               tonic_name: parsedTune.modeInfo.tonicName,
               tonic_pc: parsedTune.modeInfo.tonicPc,
               has_inline_chords: boolToFlag(hasInlineChords),
+              has_inline_structural_directives: boolToFlag(structureSummary.hasInlineStructuralDirectives),
+              has_out_of_range_beat_slots: boolToFlag(structureSummary.hasOutOfRangeBeatSlots),
+              has_overlong_measure: boolToFlag(structureSummary.hasOverlongMeasure),
+              has_short_part: boolToFlag(structureSummary.hasShortPart),
+              has_excessive_part_count: boolToFlag(structureSummary.hasExcessivePartCount),
+              is_structural_outlier: boolToFlag(structureSummary.isStructuralOutlier),
+              structural_flags: structureSummary.structuralFlags.join("|"),
               part_count: (parsedTune.partFingerprints && parsedTune.partFingerprints.length) || 1,
-              measure_count: parsedTune.measures.length,
+              measure_count: parsedTune.measures.filter(function (measure) {
+                return !measure.isPickup;
+              }).length,
               pickup_duration: formatNumber(parsedTune.pickupDuration),
+              shortest_part_length: structureSummary.shortestPartLength || "",
+              longest_part_length: structureSummary.longestPartLength || "",
+              part_length_set: structureSummary.partLengths.join("|"),
               beat_slice_index: sliceIndex,
               beat_number: slice.beatNumber,
               raw_bar_index: slice.rawBarIndex,
-              bar_index: slice.barIndex,
+              bar_index: exportBarIndex(slice),
               measure_number: slice.measureNumber,
-              measure_in_part: slice.measureInPart,
-              part_index: slice.partIndex,
-              part_pass: slice.partPass,
+              measure_in_part: exportMeasureInPart(parsedTune, slice),
+              part_index: exportPartIndex(slice),
+              part_pass: exportPartPass(slice),
               part_role: partRoleForSlice(parsedTune, slice),
-              part_length: slice.partLength,
-              measures_from_part_end: slice.measuresFromPartEnd,
+              part_length: exportPartLength(parsedTune, slice),
+              measures_from_part_end: exportMeasuresFromPartEnd(parsedTune, slice),
               phrase_stage: phraseStageForSlice(slice),
               ending_number: slice.endingNumber,
               is_pickup: boolToFlag(slice.isPickup),
               is_pickup_complement: boolToFlag(slice.isPickupComplement),
               is_cadence_measure: boolToFlag(slice.isCadenceMeasure),
-              beat_in_bar: slice.beatInBar,
-              pulse_index_in_bar: pulseIndexForSlice(parsedTune, slice),
-              beat_slot_label: slice.isPickup ? "pickup" : (slice.beatInBar === null ? "" : String(slice.beatInBar + 1)),
+              beat_in_bar: exportedBeatInBar,
+              pulse_index_in_bar: exportedPulseIndexInBar,
+              beat_slot_label: slice.isPickup ? "pickup" : (exportedBeatInBar === "" ? "" : String(exportedBeatInBar)),
               beat_strength: formatNumber(beatStrength),
               strong_beat_flag: boolToFlag(beatStrength >= 1.1),
               start: formatNumber(slice.start),
